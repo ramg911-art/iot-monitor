@@ -8,18 +8,17 @@ from typing import Any, Callable, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.models.device import (
-    DEVICE_TYPE_CAMERA,
     DEVICE_TYPE_DOOR,
     DEVICE_TYPE_TAPO_H100,
     DEVICE_TYPE_TAPO_PLUG,
     DEVICE_TYPE_TAPO_SWITCH,
+    DEVICE_TYPE_TEMP_SENSOR,
     SOURCE_TAPO_H100,
     SOURCE_TAPO_WIFI,
     Device,
 )
-from app.config import get_settings
-from app.models.sensor_history import SensorHistory
 from app.services.history_service import (
     insert_history,
     should_store_door_state,
@@ -28,6 +27,9 @@ from app.services.history_service import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Safety timeout for all kasa operations
+KASA_TIMEOUT = 5
 
 
 @dataclass
@@ -43,6 +45,7 @@ class TapoDeviceInfo:
     power: Optional[float] = None
     voltage: Optional[float] = None
     current: Optional[float] = None
+    battery: Optional[int] = None
     children: list[dict[str, Any]] = field(default_factory=list)
 
 
@@ -66,28 +69,122 @@ def _tapo_discover_kwargs() -> dict:
     return kw
 
 
+def _infer_child_type(child: Any) -> str:
+    """Detect child type from model: T110 → door, T310 → temp sensor."""
+    model = (getattr(child, "model", "") or "").upper()
+    child_type = type(child).__name__.lower()
+    if "T110" in model or "door" in child_type or "contact" in child_type:
+        return "door"
+    if "T310" in model or ("temperature" in child_type and "door" not in child_type):
+        return "temp_sensor"
+    if "door" in child_type or "contact" in child_type:
+        return "door"
+    return "temp_sensor"  # Default for unknown sensors
+
+
 async def test_tapo_connectivity(ip_address: str) -> tuple[bool, str]:
     """Test connectivity to a Tapo device by IP. Returns (success, message)."""
     try:
         from kasa import Discover
 
-        dev = await Discover.discover_single(ip_address, **_tapo_discover_kwargs())
+        dev = await asyncio.wait_for(
+            Discover.discover_single(ip_address, **_tapo_discover_kwargs()),
+            timeout=KASA_TIMEOUT,
+        )
         if dev is None:
             return False, "Device not found at IP"
         try:
-            await dev.update()
+            await asyncio.wait_for(dev.update(), timeout=KASA_TIMEOUT)
             return True, f"Connected: {dev.model} - {dev.alias}"
         finally:
             await dev.disconnect()
+    except asyncio.TimeoutError:
+        logger.warning("Tapo connectivity test timeout for %s", ip_address)
+        return False, "Connection timeout"
     except Exception as e:
         logger.exception("Tapo connectivity test failed for %s", ip_address)
         return False, str(e)
 
 
+async def _poll_h100_child(
+    session: AsyncSession,
+    parent: Device,
+    child: Any,
+    now: datetime,
+    broadcast_cb: Optional[Callable],
+) -> bool:
+    """
+    Poll H100 child (sensor, door). Create Device if not exists. Update if exists.
+    Returns True if state changed (for broadcast).
+    """
+    child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
+    child_alias = getattr(child, "alias", None) or getattr(child, "child_id", str(child_id))
+    child_type = _infer_child_type(child)
+
+    result = await session.execute(
+        select(Device).where(
+            Device.parent_device_id == parent.id,
+            Device.tapo_device_id == str(child_id),
+        )
+    )
+    dev = result.scalars().first()
+    if dev is None:
+        dtype = DEVICE_TYPE_DOOR if child_type == "door" else DEVICE_TYPE_TEMP_SENSOR
+        dev = Device(
+            name=child_alias,
+            device_type=dtype,
+            source=SOURCE_TAPO_H100,
+            parent_device_id=parent.id,
+            tapo_device_id=str(child_id),
+        )
+        session.add(dev)
+        await session.flush()
+
+    changed = False
+    dev.online = True
+    dev.last_seen = now
+
+    # Update child - fetch latest data
+    try:
+        if hasattr(child, "update") and callable(getattr(child, "update")):
+            await asyncio.wait_for(child.update(), timeout=KASA_TIMEOUT)
+    except (asyncio.TimeoutError, Exception) as ex:
+        logger.debug("Child update failed for %s: %s", child_alias, ex)
+
+    if child_type == "door":
+        state = "open" if getattr(child, "is_open", False) else "closed"
+        if dev.state != state:
+            dev.state = state
+            changed = True
+            if await should_store_door_state(session, dev.id, state):
+                await insert_history(session, dev.id, state=state, timestamp=now)
+    else:
+        temp = getattr(child, "temperature", None)
+        humidity = getattr(child, "humidity", None)
+        battery = getattr(child, "battery", None)
+        if battery is not None:
+            try:
+                dev.battery = int(battery) if isinstance(battery, (int, float)) else None
+            except (ValueError, TypeError):
+                pass
+        if temp is not None or humidity is not None:
+            if dev.temperature != temp or dev.humidity != humidity:
+                dev.temperature = temp
+                dev.humidity = humidity
+                changed = True
+                if temp is not None and await should_store_temperature(session, dev.id, temp, now):
+                    await insert_history(session, dev.id, temperature=temp, humidity=humidity, timestamp=now)
+
+    await session.flush()
+    if changed and broadcast_cb:
+        await broadcast_cb(dev)
+    return changed
+
+
 async def poll_tapo_device(
     session: AsyncSession,
     device: Device,
-    broadcast_cb: Optional[Callable] = None,
+    broadcast_cb: Optional[Callable[[Device], Any]] = None,
 ) -> bool:
     """
     Poll a Tapo device (H100 hub or WiFi switch/plug).
@@ -101,20 +198,30 @@ async def poll_tapo_device(
 
     kasa_dev = None
     try:
-        kasa_dev = await Discover.discover_single(device.ip_address, **_tapo_discover_kwargs())
+        kasa_dev = await asyncio.wait_for(
+            Discover.discover_single(device.ip_address, **_tapo_discover_kwargs()),
+            timeout=KASA_TIMEOUT,
+        )
         if kasa_dev is None:
             device.online = False
             await session.flush()
             if broadcast_cb:
-                await broadcast_cb("device", device)
+                await broadcast_cb(device)
             return True
-        await kasa_dev.update()
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
+    except asyncio.TimeoutError:
+        logger.warning("Tapo poll timeout for %s (%s)", device.name, device.ip_address)
+        device.online = False
+        await session.flush()
+        if broadcast_cb:
+            await broadcast_cb(device)
+        return True
     except Exception as e:
         logger.warning("Tapo poll failed for %s (%s): %s", device.name, device.ip_address, e)
         device.online = False
         await session.flush()
         if broadcast_cb:
-            await broadcast_cb("device", device)
+            await broadcast_cb(device)
         return True
     finally:
         if kasa_dev is not None:
@@ -128,7 +235,6 @@ async def poll_tapo_device(
     changed = False
     now = device.last_seen
 
-    # Determine device type from kasa
     dev_type = type(kasa_dev).__name__.lower()
 
     if "plug" in dev_type or "switch" in dev_type:
@@ -157,14 +263,10 @@ async def poll_tapo_device(
             except Exception as ex:
                 logger.debug("Emeter read failed: %s", ex)
     else:
-        # H100 hub or similar - may have children
-        if hasattr(kasa_dev, "children") and kasa_dev.children:
-            for child in kasa_dev.children:
-                await _poll_h100_child(session, device, child, now, broadcast_cb)
-        # Hub may have its own sensors
-        if hasattr(kasa_dev, "temperature"):
+        # H100 hub - poll hub and all children
+        if hasattr(kasa_dev, "temperature") and kasa_dev.temperature is not None:
             temp = kasa_dev.temperature
-            if temp is not None and device.temperature != temp:
+            if device.temperature != temp:
                 device.temperature = temp
                 changed = True
                 if await should_store_temperature(session, device.id, temp, now):
@@ -172,64 +274,23 @@ async def poll_tapo_device(
         if hasattr(kasa_dev, "humidity"):
             device.humidity = kasa_dev.humidity
 
+        # Poll children with asyncio.gather for parallelism
+        if hasattr(kasa_dev, "children") and kasa_dev.children:
+            child_tasks = [
+                _poll_h100_child(session, device, child, now, broadcast_cb)
+                for child in kasa_dev.children
+            ]
+            results = await asyncio.gather(*child_tasks, return_exceptions=True)
+            for i, r in enumerate(results):
+                if isinstance(r, Exception):
+                    logger.warning("Child poll failed for child %s: %s", i, r)
+                elif r:
+                    changed = True
+
     await session.flush()
     if changed and broadcast_cb:
-        await broadcast_cb("device", device)
+        await broadcast_cb(device)
     return changed
-
-
-async def _poll_h100_child(
-    session: AsyncSession,
-    parent: Device,
-    child: Any,
-    now: datetime,
-    broadcast_cb: Optional[Callable],
-) -> None:
-    """Poll H100 child (sensor, door). Create Device if not exists."""
-    child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
-    child_alias = getattr(child, "alias", None) or getattr(child, "child_id", str(child_id))
-    child_type = type(child).__name__.lower()
-
-    result = await session.execute(
-        select(Device).where(
-            Device.parent_device_id == parent.id,
-            Device.tapo_device_id == str(child_id),
-        )
-    )
-    dev = result.scalars().first()
-    if dev is None:
-        dtype = DEVICE_TYPE_DOOR if "door" in child_type or "contact" in child_type else DEVICE_TYPE_TAPO_H100
-        dev = Device(
-            name=child_alias,
-            device_type=dtype,
-            source=SOURCE_TAPO_H100,
-            parent_device_id=parent.id,
-            tapo_device_id=str(child_id),
-        )
-        session.add(dev)
-        await session.flush()
-
-    if "door" in child_type or "contact" in child_type:
-        state = "open" if getattr(child, "is_open", False) else "closed"
-        if dev.state != state:
-            dev.state = state
-            if await should_store_door_state(session, dev.id, state):
-                await insert_history(session, dev.id, state=state, timestamp=now)
-            if broadcast_cb:
-                await broadcast_cb("device", dev)
-    else:
-        temp = getattr(child, "temperature", None)
-        humidity = getattr(child, "humidity", None)
-        if temp is not None:
-            if dev.temperature != temp or dev.humidity != humidity:
-                dev.temperature = temp
-                dev.humidity = humidity
-                if await should_store_temperature(session, dev.id, temp, now):
-                    await insert_history(session, dev.id, temperature=temp, humidity=humidity, timestamp=now)
-                if broadcast_cb:
-                    await broadcast_cb("device", dev)
-
-    await session.flush()
 
 
 def _infer_tapo_device_type(kasa_dev: Any) -> str:
@@ -251,7 +312,8 @@ async def add_tapo_wifi_device(
     name: Optional[str] = None,
 ) -> tuple[Optional[Device], str]:
     """
-    Manually add Tapo WiFi switch/plug by IP.
+    Manually add Tapo WiFi switch/plug or H100 hub by IP.
+    For hubs, discovers and creates child device records.
     Returns (device, message).
     """
     from kasa import Discover
@@ -262,10 +324,15 @@ async def add_tapo_wifi_device(
 
     kasa_dev = None
     try:
-        kasa_dev = await Discover.discover_single(ip_address, **_tapo_discover_kwargs())
+        kasa_dev = await asyncio.wait_for(
+            Discover.discover_single(ip_address, **_tapo_discover_kwargs()),
+            timeout=KASA_TIMEOUT,
+        )
         if kasa_dev is None:
             return None, "Device not found at IP"
-        await kasa_dev.update()
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
+    except asyncio.TimeoutError:
+        return None, "Connection timeout"
     except Exception as e:
         return None, f"Connection failed: {e}"
     finally:
@@ -277,6 +344,7 @@ async def add_tapo_wifi_device(
 
     dtype = _infer_tapo_device_type(kasa_dev)
     source = SOURCE_TAPO_H100 if dtype == DEVICE_TYPE_TAPO_H100 else SOURCE_TAPO_WIFI
+    now = datetime.utcnow()
     dev = Device(
         name=name or getattr(kasa_dev, "alias", f"Tapo {dtype}"),
         device_type=dtype,
@@ -284,6 +352,7 @@ async def add_tapo_wifi_device(
         ip_address=ip_address,
         tapo_device_id=getattr(kasa_dev, "device_id", None) or ip_address,
         online=True,
+        last_seen=now,
         state="on" if getattr(kasa_dev, "is_on", False) else "off",
     )
     if hasattr(kasa_dev, "emeter_realtime") and kasa_dev.emeter_realtime:
@@ -294,9 +363,87 @@ async def add_tapo_wifi_device(
             dev.current = getattr(em, "current", None) or (getattr(em, "current_ma", 0) / 1000)
         except Exception:
             pass
+    if dtype == DEVICE_TYPE_TAPO_H100:
+        if hasattr(kasa_dev, "temperature"):
+            dev.temperature = kasa_dev.temperature
+        if hasattr(kasa_dev, "humidity"):
+            dev.humidity = kasa_dev.humidity
+
     session.add(dev)
     await session.flush()
+
+    # For hubs, create child device records
+    if dtype == DEVICE_TYPE_TAPO_H100 and hasattr(kasa_dev, "children") and kasa_dev.children:
+        for child in kasa_dev.children:
+            child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
+            child_alias = getattr(child, "alias", None) or getattr(child, "child_id", str(child_id))
+            child_type = _infer_child_type(child)
+            child_dtype = DEVICE_TYPE_DOOR if child_type == "door" else DEVICE_TYPE_TEMP_SENSOR
+            child_dev = Device(
+                name=child_alias,
+                device_type=child_dtype,
+                source=SOURCE_TAPO_H100,
+                parent_device_id=dev.id,
+                tapo_device_id=str(child_id),
+                online=True,
+                last_seen=now,
+            )
+            if child_type == "door":
+                child_dev.state = "open" if getattr(child, "is_open", False) else "closed"
+            else:
+                child_dev.temperature = getattr(child, "temperature", None)
+                child_dev.humidity = getattr(child, "humidity", None)
+                child_dev.battery = getattr(child, "battery", None)
+                if isinstance(child_dev.battery, (int, float)):
+                    child_dev.battery = int(child_dev.battery)
+                else:
+                    child_dev.battery = None
+            session.add(child_dev)
+        await session.flush()
+
     return dev, "Device added successfully"
+
+
+async def _control_plug(
+    session: AsyncSession,
+    device: Device,
+    turn_on: bool,
+) -> bool:
+    """Turn plug on or off. Returns new state."""
+    from kasa import Discover
+
+    if not device.ip_address:
+        raise ValueError("Device has no IP")
+    kasa_dev = await asyncio.wait_for(
+        Discover.discover_single(device.ip_address, **_tapo_discover_kwargs()),
+        timeout=KASA_TIMEOUT,
+    )
+    if kasa_dev is None:
+        raise ConnectionError("Device not found")
+    try:
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
+        if turn_on:
+            await asyncio.wait_for(kasa_dev.turn_on(), timeout=KASA_TIMEOUT)
+        else:
+            await asyncio.wait_for(kasa_dev.turn_off(), timeout=KASA_TIMEOUT)
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
+        new_state = kasa_dev.is_on
+        device.state = "on" if new_state else "off"
+        device.online = True
+        await session.flush()
+        return new_state
+    finally:
+        await kasa_dev.disconnect()
+
+
+async def turn_on_device(session: AsyncSession, device: Device) -> bool:
+    """Turn Tapo switch/plug ON. Returns new state (True = on)."""
+    return await _control_plug(session, device, turn_on=True)
+
+
+async def turn_off_device(session: AsyncSession, device: Device) -> bool:
+    """Turn Tapo switch/plug OFF. Returns new state (False = off)."""
+    return await _control_plug(session, device, turn_on=False)
 
 
 async def toggle_tapo_device(session: AsyncSession, device: Device) -> bool:
@@ -305,16 +452,19 @@ async def toggle_tapo_device(session: AsyncSession, device: Device) -> bool:
 
     if not device.ip_address:
         raise ValueError("Device has no IP")
-    kasa_dev = await Discover.discover_single(device.ip_address, **_tapo_discover_kwargs())
+    kasa_dev = await asyncio.wait_for(
+        Discover.discover_single(device.ip_address, **_tapo_discover_kwargs()),
+        timeout=KASA_TIMEOUT,
+    )
     if kasa_dev is None:
         raise ConnectionError("Device not found")
     try:
-        await kasa_dev.update()
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
         if kasa_dev.is_on:
-            await kasa_dev.turn_off()
+            await asyncio.wait_for(kasa_dev.turn_off(), timeout=KASA_TIMEOUT)
         else:
-            await kasa_dev.turn_on()
-        await kasa_dev.update()
+            await asyncio.wait_for(kasa_dev.turn_on(), timeout=KASA_TIMEOUT)
+        await asyncio.wait_for(kasa_dev.update(), timeout=KASA_TIMEOUT)
         new_state = kasa_dev.is_on
         device.state = "on" if new_state else "off"
         device.online = True

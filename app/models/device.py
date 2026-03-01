@@ -17,7 +17,8 @@ DEVICE_TYPE_TAPO_H100 = "tapo_h100"
 DEVICE_TYPE_TAPO_SWITCH = "tapo_switch"
 DEVICE_TYPE_TAPO_PLUG = "tapo_plug"
 DEVICE_TYPE_EWELINK = "ewelink"
-DEVICE_TYPE_DOOR = "door"  # H100 door sensor (child of tapo_h100)
+DEVICE_TYPE_DOOR = "door"  # H100 door sensor T110 (child of tapo_h100)
+DEVICE_TYPE_TEMP_SENSOR = "temp_sensor"  # H100 temp/humidity sensor T310
 
 # Source for device origin
 SOURCE_TAPO_H100 = "tapo_h100"
@@ -49,6 +50,7 @@ class Device(Base):
     power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Watts
     voltage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     current: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    battery: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # % for sensors
     online: Mapped[bool] = mapped_column(default=True)
 
     # Metadata
@@ -59,7 +61,7 @@ class Device(Base):
 
     # Relationships
     parent: Mapped[Optional["Device"]] = relationship(
-        "Device", remote_side="Device.id", foreign_keys=[parent_device_id]
+        "Device", remote_side="Device.id", foreign_keys=[parent_device_id], back_populates="children"
     )
     children: Mapped[list["Device"]] = relationship("Device", back_populates="parent")
     history: Mapped[list["SensorHistory"]] = relationship(

@@ -8,52 +8,73 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.database import async_session_maker
-from app.models.device import Device, DEVICE_TYPE_CAMERA, DEVICE_TYPE_TAPO_H100, DEVICE_TYPE_TAPO_SWITCH, DEVICE_TYPE_TAPO_PLUG
+from app.models.device import (
+    Device,
+    DEVICE_TYPE_CAMERA,
+    DEVICE_TYPE_TAPO_H100,
+    DEVICE_TYPE_TAPO_SWITCH,
+    DEVICE_TYPE_TAPO_PLUG,
+)
 from app.services.tapo_service import poll_tapo_device
 from app.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
 
 
-async def _broadcast_device(device: Device) -> None:
-    await ws_manager.broadcast("device", {
-        "id": device.id,
-        "name": device.name,
-        "device_type": device.device_type,
-        "state": device.state,
-        "temperature": device.temperature,
-        "humidity": device.humidity,
-        "power": device.power,
-        "online": device.online,
-    })
+async def _broadcast_device_update(device: Device) -> None:
+    """Broadcast standardized device_update (only on state change)."""
+    await ws_manager.broadcast_device_update(device)
+
+
+async def _poll_single_tapo_device(
+    session: AsyncSession,
+    device: Device,
+) -> None:
+    """Poll a single Tapo device with timeout and error isolation."""
+    try:
+        await asyncio.wait_for(
+            poll_tapo_device(session, device, broadcast_cb=_broadcast_device_update),
+            timeout=15,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("Tapo poll timeout for device %s (%s)", device.name, device.id)
+    except Exception as e:
+        logger.warning("Tapo poll failed for %s: %s", device.name, e)
+        # Mark offline on error
+        device.online = False
+        await session.flush()
+        await _broadcast_device_update(device)
 
 
 async def _poll_tapo_with_broadcast(session: AsyncSession) -> None:
-    async def bc(_, dev):
-        await _broadcast_device(dev)
+    """Poll all Tapo devices (hubs, switches, plugs). Children are polled via hub."""
+    # Only poll devices with IP (hubs and standalone plugs/switches). Children have no IP.
     stmt = select(Device).where(
-        Device.device_type.in_([DEVICE_TYPE_TAPO_H100, DEVICE_TYPE_TAPO_SWITCH, DEVICE_TYPE_TAPO_PLUG]),
+        Device.device_type.in_(
+            [DEVICE_TYPE_TAPO_H100, DEVICE_TYPE_TAPO_SWITCH, DEVICE_TYPE_TAPO_PLUG]
+        ),
         Device.ip_address.isnot(None),
     )
     result = await session.execute(stmt)
     devices = result.scalars().all()
+
+    # Poll devices with small stagger to avoid overwhelming network
     for dev in devices:
-        try:
-            await poll_tapo_device(session, dev, broadcast_cb=bc)
-        except Exception as e:
-            logger.warning("Tapo poll failed for %s: %s", dev.name, e)
+        await _poll_single_tapo_device(session, dev)
         await asyncio.sleep(0.5)  # Stagger to avoid DDoS
 
 
 async def tapo_poll_loop() -> None:
-    """Poll Tapo H100 and WiFi switches every 30s."""
+    """Poll Tapo H100 and WiFi switches every 30s. Errors do not crash the loop."""
     settings = get_settings()
     interval = settings.tapo_poll_interval
+    logger.info("Tapo poll loop started (interval=%ds)", interval)
     while True:
         try:
             async with async_session_maker() as session:
                 await _poll_tapo_with_broadcast(session)
         except asyncio.CancelledError:
+            logger.info("Tapo poll loop cancelled")
             break
         except Exception as e:
             logger.exception("Tapo poll loop error: %s", e)
@@ -71,6 +92,7 @@ async def camera_poll_loop() -> None:
     while True:
         try:
             import httpx
+
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{settings.go2rtc_url}/api/streams")
                 if resp.status_code == 200:

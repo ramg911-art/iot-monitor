@@ -1,4 +1,4 @@
-"""Tapo device management - add switch by IP, test, toggle."""
+"""Tapo device management - add switch/hub by IP, test, toggle, on, off."""
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -13,6 +13,8 @@ from app.services.tapo_service import (
     add_tapo_wifi_device,
     test_tapo_connectivity,
     toggle_tapo_device,
+    turn_on_device,
+    turn_off_device,
 )
 from app.websocket import ws_manager
 
@@ -47,19 +49,11 @@ async def add_device(
     user_id: int = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_db),
 ):
-    """Manually add Tapo WiFi switch/plug by IP."""
-    async def broadcast(event_type: str, device: Device):
-        await ws_manager.broadcast(event_type, {
-            "id": device.id,
-            "name": device.name,
-            "device_type": device.device_type,
-            "state": device.state,
-            "power": device.power,
-            "online": device.online,
-        })
+    """Manually add Tapo WiFi switch/plug or H100 hub by IP."""
     dev, msg = await add_tapo_wifi_device(session, data.ip_address, data.name)
     if not dev:
         raise HTTPException(status_code=400, detail=msg)
+    await ws_manager.broadcast_device_update(dev)
     return AddTapoDeviceResponse(id=dev.id, name=dev.name, device_type=dev.device_type, message=msg)
 
 
@@ -78,14 +72,49 @@ async def toggle_device(
         raise HTTPException(status_code=400, detail="Not a Tapo switch/plug")
     try:
         new_state = await toggle_tapo_device(session, dev)
-        await ws_manager.broadcast("device", {
-            "id": dev.id,
-            "name": dev.name,
-            "device_type": dev.device_type,
-            "state": "on" if new_state else "off",
-            "power": dev.power,
-            "online": dev.online,
-        })
+        await ws_manager.broadcast_device_update(dev)
+        return {"state": "on" if new_state else "off"}
+    except (ConnectionError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/{device_id}/on")
+async def turn_on(
+    device_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Turn Tapo switch/plug ON."""
+    result = await session.execute(select(Device).where(Device.id == device_id))
+    dev = result.scalars().first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if dev.device_type not in ("tapo_switch", "tapo_plug"):
+        raise HTTPException(status_code=400, detail="Not a Tapo switch/plug")
+    try:
+        new_state = await turn_on_device(session, dev)
+        await ws_manager.broadcast_device_update(dev)
+        return {"state": "on" if new_state else "off"}
+    except (ConnectionError, ValueError) as e:
+        raise HTTPException(status_code=502, detail=str(e))
+
+
+@router.post("/{device_id}/off")
+async def turn_off(
+    device_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Turn Tapo switch/plug OFF."""
+    result = await session.execute(select(Device).where(Device.id == device_id))
+    dev = result.scalars().first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    if dev.device_type not in ("tapo_switch", "tapo_plug"):
+        raise HTTPException(status_code=400, detail="Not a Tapo switch/plug")
+    try:
+        new_state = await turn_off_device(session, dev)
+        await ws_manager.broadcast_device_update(dev)
         return {"state": "on" if new_state else "off"}
     except (ConnectionError, ValueError) as e:
         raise HTTPException(status_code=502, detail=str(e))

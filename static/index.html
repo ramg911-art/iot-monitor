@@ -316,7 +316,7 @@
       if (!token) return;
       const [devices, streams] = await Promise.all([loadDevices(), loadCameras()]);
       const devList = Array.isArray(devices) ? devices : [];
-      renderDevices(devList, 'tapo-grid', ['tapo_h100', 'tapo_switch', 'tapo_plug', 'door'], true);
+      renderDevices(devList, 'tapo-grid', ['tapo_h100', 'tapo_switch', 'tapo_plug', 'door', 'temp_sensor'], true);
       renderDevices(devList, 'ewelink-grid', ['ewelink'], true);
       const camGrid = document.getElementById('camera-grid');
       camGrid.innerHTML = (streams || []).map(s => `
@@ -362,7 +362,7 @@
       ws.onmessage = (e) => {
         try {
           const msg = JSON.parse(e.data);
-          if (msg.type === 'device') loadAll();
+          if (msg.type === 'device' || msg.type === 'device_update') loadAll();
         } catch (_) {}
       };
       ws.onclose = () => setTimeout(connectWs, 3000);
