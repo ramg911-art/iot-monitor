@@ -33,6 +33,19 @@ KASA_TIMEOUT = 5
 
 
 @dataclass
+class ChildPollResult:
+    """Result of network-only child poll. Used to pass data from concurrent fetch to sequential DB write."""
+    child_id: str
+    child_alias: str
+    child_type: str  # "door" | "temp_sensor"
+    state: Optional[str] = None  # open/closed for door
+    temperature: Optional[float] = None
+    humidity: Optional[float] = None
+    battery: Optional[int] = None
+    fetch_ok: bool = True
+
+
+@dataclass
 class TapoDeviceInfo:
     device_id: str
     device_type: str  # tapo_h100, tapo_switch, tapo_plug
@@ -106,74 +119,116 @@ async def test_tapo_connectivity(ip_address: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-async def _poll_h100_child(
-    session: AsyncSession,
-    parent: Device,
-    child: Any,
-    now: datetime,
-    broadcast_cb: Optional[Callable],
-) -> bool:
+async def _fetch_child_data(child: Any) -> ChildPollResult:
     """
-    Poll H100 child (sensor, door). Create Device if not exists. Update if exists.
-    Returns True if state changed (for broadcast).
+    Network-only: fetch child state from kasa device. No DB access.
+    Safe to run concurrently via asyncio.gather.
     """
     child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
     child_alias = getattr(child, "alias", None) or getattr(child, "child_id", str(child_id))
     child_type = _infer_child_type(child)
-
-    result = await session.execute(
-        select(Device).where(
-            Device.parent_device_id == parent.id,
-            Device.tapo_device_id == str(child_id),
-        )
-    )
-    dev = result.scalars().first()
-    if dev is None:
-        dtype = DEVICE_TYPE_DOOR if child_type == "door" else DEVICE_TYPE_TEMP_SENSOR
-        dev = Device(
-            name=child_alias,
-            device_type=dtype,
-            source=SOURCE_TAPO_H100,
-            parent_device_id=parent.id,
-            tapo_device_id=str(child_id),
-        )
-        session.add(dev)
-        await session.flush()
-
-    changed = False
-    dev.online = True
-    dev.last_seen = now
-
-    # Update child - fetch latest data
     try:
         if hasattr(child, "update") and callable(getattr(child, "update")):
             await asyncio.wait_for(child.update(), timeout=KASA_TIMEOUT)
     except (asyncio.TimeoutError, Exception) as ex:
         logger.debug("Child update failed for %s: %s", child_alias, ex)
-
+        return ChildPollResult(
+            child_id=str(child_id),
+            child_alias=child_alias,
+            child_type=child_type,
+            fetch_ok=False,
+        )
+    state = None
+    temp = None
+    humidity = None
+    battery = None
     if child_type == "door":
         state = "open" if getattr(child, "is_open", False) else "closed"
-        if dev.state != state:
-            dev.state = state
-            changed = True
-            if await should_store_door_state(session, dev.id, state):
-                await insert_history(session, dev.id, state=state, timestamp=now)
     else:
         temp = getattr(child, "temperature", None)
         humidity = getattr(child, "humidity", None)
-        battery = getattr(child, "battery", None)
-        if battery is not None:
+        b = getattr(child, "battery", None)
+        if b is not None and isinstance(b, (int, float)):
             try:
-                dev.battery = int(battery) if isinstance(battery, (int, float)) else None
+                battery = int(b)
             except (ValueError, TypeError):
                 pass
-        if temp is not None or humidity is not None:
-            if dev.temperature != temp or dev.humidity != humidity:
-                dev.temperature = temp
-                dev.humidity = humidity
+    return ChildPollResult(
+        child_id=str(child_id),
+        child_alias=child_alias,
+        child_type=child_type,
+        state=state,
+        temperature=temp,
+        humidity=humidity,
+        battery=battery,
+        fetch_ok=True,
+    )
+
+
+async def _apply_child_to_db(
+    session: AsyncSession,
+    parent: Device,
+    child_data: ChildPollResult,
+    now: datetime,
+    broadcast_cb: Optional[Callable[[Device], Any]],
+) -> bool:
+    """
+    DB-only: insert or update child device. Must run sequentially (single session).
+    Returns True if state changed (for broadcast).
+    """
+    result = await session.execute(
+        select(Device).where(
+            Device.parent_device_id == parent.id,
+            Device.tapo_device_id == child_data.child_id,
+        )
+    )
+    dev = result.scalars().first()
+    if dev is None:
+        dtype = DEVICE_TYPE_DOOR if child_data.child_type == "door" else DEVICE_TYPE_TEMP_SENSOR
+        dev = Device(
+            name=child_data.child_alias,
+            device_type=dtype,
+            source=SOURCE_TAPO_H100,
+            parent_device_id=parent.id,
+            tapo_device_id=child_data.child_id,
+        )
+        session.add(dev)
+        await session.flush()
+
+    changed = False
+    dev.online = child_data.fetch_ok
+    dev.last_seen = now
+
+    if not child_data.fetch_ok:
+        await session.flush()
+        if broadcast_cb:
+            await broadcast_cb(dev)
+        return changed
+
+    if child_data.child_type == "door":
+        if dev.state != child_data.state:
+            dev.state = child_data.state
+            changed = True
+            if child_data.state and await should_store_door_state(session, dev.id, child_data.state):
+                await insert_history(session, dev.id, state=child_data.state, timestamp=now)
+    else:
+        if child_data.battery is not None:
+            dev.battery = child_data.battery
+        if child_data.temperature is not None or child_data.humidity is not None:
+            if dev.temperature != child_data.temperature or dev.humidity != child_data.humidity:
+                dev.temperature = child_data.temperature
+                dev.humidity = child_data.humidity
                 changed = True
-                if temp is not None and await should_store_temperature(session, dev.id, temp, now):
-                    await insert_history(session, dev.id, temperature=temp, humidity=humidity, timestamp=now)
+                if child_data.temperature is not None and await should_store_temperature(
+                    session, dev.id, child_data.temperature, now
+                ):
+                    await insert_history(
+                        session,
+                        dev.id,
+                        temperature=child_data.temperature,
+                        humidity=child_data.humidity,
+                        timestamp=now,
+                    )
 
     await session.flush()
     if changed and broadcast_cb:
@@ -274,18 +329,22 @@ async def poll_tapo_device(
         if hasattr(kasa_dev, "humidity"):
             device.humidity = kasa_dev.humidity
 
-        # Poll children with asyncio.gather for parallelism
+        # Poll children: network concurrently, DB sequentially (no session sharing)
         if hasattr(kasa_dev, "children") and kasa_dev.children:
-            child_tasks = [
-                _poll_h100_child(session, device, child, now, broadcast_cb)
-                for child in kasa_dev.children
-            ]
-            results = await asyncio.gather(*child_tasks, return_exceptions=True)
-            for i, r in enumerate(results):
+            # Phase 1: Concurrent network fetch (no session)
+            fetch_tasks = [_fetch_child_data(child) for child in kasa_dev.children]
+            child_results = await asyncio.gather(*fetch_tasks, return_exceptions=True)
+            # Phase 2: Sequential DB writes (single session)
+            for i, r in enumerate(child_results):
                 if isinstance(r, Exception):
-                    logger.warning("Child poll failed for child %s: %s", i, r)
-                elif r:
-                    changed = True
+                    logger.warning("Child fetch failed for child %s: %s", i, r)
+                    continue
+                if isinstance(r, ChildPollResult):
+                    child_changed = await _apply_child_to_db(
+                        session, device, r, now, broadcast_cb
+                    )
+                    if child_changed:
+                        changed = True
 
     await session.flush()
     if changed and broadcast_cb:
