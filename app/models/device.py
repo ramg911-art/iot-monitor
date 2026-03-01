@@ -1,0 +1,67 @@
+"""Device model for cameras, Tapo, eWeLink."""
+from datetime import datetime
+from typing import TYPE_CHECKING, Optional
+
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base
+
+if TYPE_CHECKING:
+    from app.models.sensor_history import SensorHistory
+
+
+# Device types
+DEVICE_TYPE_CAMERA = "camera"
+DEVICE_TYPE_TAPO_H100 = "tapo_h100"
+DEVICE_TYPE_TAPO_SWITCH = "tapo_switch"
+DEVICE_TYPE_TAPO_PLUG = "tapo_plug"
+DEVICE_TYPE_EWELINK = "ewelink"
+DEVICE_TYPE_DOOR = "door"  # H100 door sensor (child of tapo_h100)
+
+# Source for device origin
+SOURCE_TAPO_H100 = "tapo_h100"
+SOURCE_TAPO_WIFI = "tapo_wifi"
+SOURCE_EWELINK = "ewelink"
+SOURCE_MANUAL = "manual"
+
+
+class Device(Base):
+    __tablename__ = "devices"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    device_type: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default=SOURCE_MANUAL)
+
+    # Connection / identity
+    ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)  # IPv6 support
+    rtsp_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    go2rtc_stream_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    ewelink_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    tapo_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    parent_device_id: Mapped[Optional[int]] = mapped_column(ForeignKey("devices.id"), nullable=True)
+
+    # Current state (denormalized for quick access)
+    state: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # on, off, open, closed
+    temperature: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    humidity: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    power: Mapped[Optional[float]] = mapped_column(Float, nullable=True)  # Watts
+    voltage: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    current: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    online: Mapped[bool] = mapped_column(default=True)
+
+    # Metadata
+    extra_data: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # JSON
+    last_seen: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Relationships
+    parent: Mapped[Optional["Device"]] = relationship(
+        "Device", remote_side="Device.id", foreign_keys=[parent_device_id]
+    )
+    children: Mapped[list["Device"]] = relationship("Device", back_populates="parent")
+    history: Mapped[list["SensorHistory"]] = relationship(
+        "SensorHistory", back_populates="device", cascade="all, delete-orphan", order_by="SensorHistory.timestamp.desc()"
+    )

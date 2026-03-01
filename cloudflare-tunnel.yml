@@ -1,0 +1,11 @@
+# Cloudflare Tunnel configuration
+# Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/install-and-setup/installation/
+# Run: cloudflared tunnel run
+
+tunnel: <YOUR_TUNNEL_ID>
+credentials-file: /path/to/credentials.json
+
+ingress:
+  - hostname: iot.your-domain.com
+    service: http://localhost:8000
+  - service: http_status:404

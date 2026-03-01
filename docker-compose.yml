@@ -1,0 +1,37 @@
+version: "3.8"
+
+services:
+  iot-monitor:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:///./data/iot_monitor.db
+      - GO2RTC_URL=http://go2rtc:1984
+    volumes:
+      - iot-data:/app/data
+    depends_on:
+      - go2rtc
+    restart: unless-stopped
+    networks:
+      - iot
+
+  go2rtc:
+    image: alexxit/go2rtc:latest
+    container_name: go2rtc
+    restart: unless-stopped
+    ports:
+      - "1984:1984"
+    volumes:
+      - ./go2rtc.yaml:/config/go2rtc.yaml:ro
+    networks:
+      - iot
+
+volumes:
+  iot-data:
+
+networks:
+  iot:
+    driver: bridge

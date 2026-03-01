@@ -1,0 +1,8 @@
+# go2rtc configuration
+# Add your RTSP camera streams here
+# https://github.com/blakeblackshear/frigate/tree/master/go2rtc
+
+streams:
+  # Example:
+  # front_door: rtsp://user:pass@192.168.1.10:554/stream1
+  # garage: rtsp://admin:admin@192.168.1.11:554/cam/realmonitor?channel=1&subtype=0

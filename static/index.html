@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IoT Monitor</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f0f12;
+      --surface: #1a1a1f;
+      --border: #2a2a32;
+      --text: #e8e8ed;
+      --muted: #888;
+      --accent: #00d4aa;
+      --accent-dim: #00a884;
+      --danger: #ff6b6b;
+      --success: #51cf66;
+      --radius: 8px;
+      --font: 'JetBrains Mono', 'Fira Code', 'SF Mono', monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: var(--font);
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      min-height: 100vh;
+    }
+    .container { max-width: 1400px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 1.5rem; margin: 0 0 24px; color: var(--accent); }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 16px;
+      transition: border-color 0.2s;
+    }
+    .card:hover { border-color: var(--accent-dim); }
+    .card h3 { margin: 0 0 12px; font-size: 1rem; }
+    .card .meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 8px; }
+    .card .value { font-size: 1.5rem; color: var(--accent); }
+    .toggle-btn {
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      padding: 8px 16px;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+      margin-top: 8px;
+    }
+    .toggle-btn.off { background: var(--border); color: var(--text); }
+    .toggle-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .status { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status.online { background: var(--success); }
+    .status.offline { background: var(--danger); }
+    .login-form {
+      max-width: 320px;
+      margin: 80px auto;
+      padding: 24px;
+      background: var(--surface);
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+    }
+    .login-form input {
+      width: 100%;
+      padding: 12px;
+      margin-bottom: 12px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-family: inherit;
+    }
+    .login-form button {
+      width: 100%;
+      padding: 12px;
+      background: var(--accent);
+      color: var(--bg);
+      border: none;
+      border-radius: var(--radius);
+      cursor: pointer;
+      font-family: inherit;
+      font-weight: 600;
+    }
+    .section { margin-bottom: 32px; }
+    .section h2 { font-size: 1.1rem; margin-bottom: 16px; color: var(--muted); }
+    .camera-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .camera-frame {
+      aspect-ratio: 16/9;
+      background: var(--surface);
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+    }
+    .camera-frame iframe { width: 100%; height: 100%; border: none; }
+    .chart-container { height: 200px; margin-top: 16px; }
+    .modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.7);
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+    }
+    .modal.open { display: flex; }
+    .modal-content {
+      background: var(--surface);
+      padding: 24px;
+      border-radius: var(--radius);
+      max-width: 480px;
+      width: 90%;
+    }
+    .modal h3 { margin-top: 0; }
+    .modal input { width: 100%; padding: 10px; margin: 8px 0; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); }
+    .modal .actions { display: flex; gap: 8px; margin-top: 16px; }
+    .modal .actions button { flex: 1; padding: 10px; border-radius: var(--radius); border: none; cursor: pointer; font-family: inherit; }
+    .modal .actions .primary { background: var(--accent); color: var(--bg); }
+    .modal .actions .secondary { background: var(--border); color: var(--text); }
+    .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+    .topbar .user { font-size: 0.85rem; color: var(--muted); }
+    .topbar button { background: transparent; border: 1px solid var(--border); color: var(--text); padding: 8px 16px; border-radius: var(--radius); cursor: pointer; font-family: inherit; }
+    .topbar button:hover { border-color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div id="login-screen" class="login-form">
+    <h2>IoT Monitor</h2>
+    <input type="text" id="login-user" placeholder="Username" value="admin">
+    <input type="password" id="login-pass" placeholder="Password">
+    <button id="login-btn">Sign in</button>
+    <p id="login-err" style="color:var(--danger);font-size:0.85rem;margin-top:12px;display:none"></p>
+  </div>
+
+  <div id="app" style="display:none">
+    <div class="container">
+      <div class="topbar">
+        <h1>IoT Monitor</h1>
+        <div>
+          <span class="user">Connected</span>
+          <button id="logout-btn">Logout</button>
+        </div>
+      </div>
+
+      <div class="section">
+        <h2>Cameras</h2>
+        <div id="camera-grid" class="camera-grid"></div>
+      </div>
+
+      <div class="section">
+        <h2>Tapo Sensors & Switches</h2>
+        <button id="tapo-add" style="margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">+ Add WiFi Switch by IP</button>
+        <div id="tapo-grid" class="grid"></div>
+      </div>
+
+      <div class="section">
+        <h2>eWeLink Devices</h2>
+        <button id="ewelink-connect" style="margin-right:8px;margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Connect eWeLink</button>
+        <button id="ewelink-sync" style="margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Sync eWeLink</button>
+        <div id="ewelink-grid" class="grid"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="tapo-add-modal" class="modal">
+    <div class="modal-content">
+      <h3>Add Tapo WiFi Switch</h3>
+      <input id="tapo-ip" type="text" placeholder="IP address (e.g. 192.168.1.100)">
+      <input id="tapo-name" type="text" placeholder="Name (optional)">
+      <div class="actions">
+        <button class="primary" id="tapo-add-save">Add</button>
+        <button class="secondary" onclick="document.getElementById('tapo-add-modal').classList.remove('open')">Cancel</button>
+      </div>
+      <p id="tapo-add-err" style="color:var(--danger);font-size:0.85rem;margin-top:8px;display:none"></p>
+    </div>
+  </div>
+
+  <div id="chart-modal" class="modal">
+    <div class="modal-content">
+      <h3 id="chart-title">History</h3>
+      <div class="chart-container"><canvas id="history-chart"></canvas></div>
+      <button class="toggle-btn" style="margin-top:12px" onclick="document.getElementById('chart-modal').classList.remove('open')">Close</button>
+    </div>
+  </div>
+
+  <script>
+    let token = localStorage.getItem('iot_token');
+    const API = '/api';
+
+    async function api(method, path, body) {
+      const opts = { method, headers: { 'Content-Type': 'application/json' } };
+      if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+      if (body) opts.body = JSON.stringify(body);
+      const r = await fetch(API + path, opts);
+      if (r.status === 401) { token = null; localStorage.removeItem('iot_token'); showLogin(); return null; }
+      return r.ok ? r.json() : null;
+    }
+
+    function showLogin() {
+      document.getElementById('login-screen').style.display = 'block';
+      document.getElementById('app').style.display = 'none';
+    }
+
+    function showApp() {
+      document.getElementById('login-screen').style.display = 'none';
+      document.getElementById('app').style.display = 'block';
+      loadAll();
+    }
+
+    document.getElementById('login-btn').onclick = async () => {
+      const user = document.getElementById('login-user').value;
+      const pass = document.getElementById('login-pass').value;
+      const err = document.getElementById('login-err');
+      const r = await fetch(API + '/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ username: user, password: pass })
+      });
+      const data = await r.json();
+      if (data.access_token) {
+        token = data.access_token;
+        localStorage.setItem('iot_token', token);
+        err.style.display = 'none';
+        showApp();
+      } else {
+        err.textContent = data.detail || 'Login failed';
+        err.style.display = 'block';
+      }
+    };
+
+    document.getElementById('logout-btn').onclick = () => {
+      token = null;
+      localStorage.removeItem('iot_token');
+      showLogin();
+    };
+
+    async function loadDevices() {
+      const data = await api('GET', '/devices');
+      return Array.isArray(data) ? data : [];
+    }
+
+    async function loadCameras() {
+      const data = await api('GET', '/cameras/streams');
+      return (data && data.streams) || [];
+    }
+
+    function renderDevices(devices, gridId, types, showChart) {
+      const grid = document.getElementById(gridId);
+      const filtered = devices.filter(d => types.includes(d.device_type));
+      grid.innerHTML = filtered.map(d => `
+        <div class="card" data-id="${d.id}" data-type="${d.device_type}">
+          <h3><span class="status ${d.online ? 'online' : 'offline'}"></span>${d.name}</h3>
+          <div class="meta">${d.device_type} · ${d.source || '-'}</div>
+          ${d.temperature != null ? `<div class="value">${d.temperature}°C</div>` : ''}
+          ${d.humidity != null ? `<div class="value">${d.humidity}% RH</div>` : ''}
+          ${d.power != null ? `<div class="value">${d.power} W</div>` : ''}
+          ${(d.device_type === 'tapo_switch' || d.device_type === 'tapo_plug' || d.device_type === 'ewelink') ?
+            `<button class="toggle-btn ${d.state === 'on' ? '' : 'off'}" data-id="${d.id}" data-type="${d.device_type}">${d.state === 'on' ? 'ON' : 'OFF'}</button>` : ''}
+          ${showChart && (d.temperature != null || d.power != null) ? `<button class="toggle-btn secondary" style="margin-left:8px" onclick="showHistory(${d.id}, '${d.name}')">History</button>` : ''}
+        </div>
+      `).join('');
+      grid.querySelectorAll('.toggle-btn[data-id]').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.id;
+          const dtype = btn.dataset.type;
+          if (dtype === 'ewelink') {
+            const dev = filtered.find(x => x.id == id);
+            const eid = dev.ewelink_device_id;
+            const turnOn = dev.state !== 'on';
+            await api('POST', '/ewelink/toggle', { device_id: eid, turn_on: turnOn });
+          } else {
+            await api('POST', `/tapo/${id}/toggle`);
+          }
+          loadAll();
+        };
+      });
+    }
+
+    async function showHistory(deviceId, name) {
+      const data = await api('GET', `/devices/${deviceId}/history?hours=24`);
+      if (!data || !data.length) { alert('No history'); return; }
+      document.getElementById('chart-title').textContent = name + ' - 24h';
+      const ctx = document.getElementById('history-chart').getContext('2d');
+      const labels = data.map(d => new Date(d.timestamp).toLocaleTimeString());
+      const datasets = [];
+      if (data.some(d => d.temperature != null)) {
+        datasets.push({ label: 'Temperature °C', data: data.map(d => d.temperature), borderColor: '#00d4aa', fill: false });
+      }
+      if (data.some(d => d.power != null)) {
+        datasets.push({ label: 'Power W', data: data.map(d => d.power), borderColor: '#ff6b6b', fill: false });
+      }
+      if (datasets.length === 0) { alert('No chart data'); return; }
+      if (window.historyChart) window.historyChart.destroy();
+      window.historyChart = new Chart(ctx, {
+        type: 'line',
+        data: { labels, datasets },
+        options: { responsive: true, maintainAspectRatio: false }
+      });
+      document.getElementById('chart-modal').classList.add('open');
+    }
+
+    async function loadAll() {
+      if (!token) return;
+      const [devices, streams] = await Promise.all([loadDevices(), loadCameras()]);
+      const devList = Array.isArray(devices) ? devices : [];
+      renderDevices(devList, 'tapo-grid', ['tapo_h100', 'tapo_switch', 'tapo_plug', 'door'], true);
+      renderDevices(devList, 'ewelink-grid', ['ewelink'], true);
+      const camGrid = document.getElementById('camera-grid');
+      camGrid.innerHTML = (streams || []).map(s => `
+        <div class="camera-frame">
+          <iframe src="${s.url}" title="${s.name}"></iframe>
+        </div>
+      `).join('');
+    }
+
+    document.getElementById('tapo-add').onclick = () => document.getElementById('tapo-add-modal').classList.add('open');
+    document.getElementById('tapo-add-save').onclick = async () => {
+      const ip = document.getElementById('tapo-ip').value.trim();
+      const name = document.getElementById('tapo-name').value.trim() || undefined;
+      const err = document.getElementById('tapo-add-err');
+      const r = await api('POST', '/tapo/add', { ip_address: ip, name });
+      if (r && r.id) {
+        document.getElementById('tapo-add-modal').classList.remove('open');
+        document.getElementById('tapo-ip').value = '';
+        document.getElementById('tapo-name').value = '';
+        err.style.display = 'none';
+        loadAll();
+      } else {
+        err.textContent = r?.detail || 'Failed to add device';
+        err.style.display = 'block';
+      }
+    };
+
+    document.getElementById('ewelink-connect').onclick = async () => {
+      const r = await api('GET', '/ewelink/login-url');
+      if (r && r.url) window.open(r.url);
+    };
+
+    document.getElementById('ewelink-sync').onclick = async () => {
+      await api('POST', '/ewelink/sync');
+      loadAll();
+    };
+
+    // WebSocket
+    let ws;
+    function connectWs() {
+      if (!token) return;
+      ws = new WebSocket(`${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws?token=${token}`);
+      ws.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === 'device') loadAll();
+        } catch (_) {}
+      };
+      ws.onclose = () => setTimeout(connectWs, 3000);
+    }
+    connectWs();
+
+    if (token) showApp();
+    else showLogin();
+
+    // Show eWeLink OAuth result
+    const params = new URLSearchParams(location.search);
+    if (params.get('ewelink') === 'success') {
+      alert('eWeLink connected! Click Sync to load devices.');
+      history.replaceState({}, '', '/');
+    } else if (params.get('ewelink') === 'error') {
+      alert('eWeLink error: ' + (params.get('msg') || 'Unknown'));
+      history.replaceState({}, '', '/');
+    }
+  </script>
+</body>
+</html>
