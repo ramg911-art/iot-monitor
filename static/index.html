@@ -145,6 +145,13 @@
     .camera-frame { position: relative; }
     .loading-spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
+    .card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; align-items: center; }
+    .card-actions .toggle-btn { margin-top: 0; }
+    .delete-btn { background: transparent; border: 1px solid var(--danger); color: var(--danger); padding: 6px 12px; border-radius: var(--radius); cursor: pointer; font-size: 0.75rem; font-family: inherit; }
+    .delete-btn:hover { background: var(--danger); color: var(--bg); }
+    .door-status { font-size: 1rem; padding: 4px 10px; border-radius: var(--radius); display: inline-block; margin-top: 4px; }
+    .door-status.open { background: rgba(255,107,107,0.2); color: var(--danger); }
+    .door-status.closed { background: rgba(81,207,102,0.2); color: var(--success); }
   </style>
 </head>
 <body>
@@ -292,31 +299,67 @@
     function renderDevices(devices, gridId, types, showChart) {
       const grid = document.getElementById(gridId);
       const filtered = devices.filter(d => types.includes(d.device_type));
-      grid.innerHTML = filtered.map(d => `
+      const switchTypes = ['tapo_switch', 'tapo_plug', 'ewelink'];
+      grid.innerHTML = filtered.map(d => {
+        const isSwitch = switchTypes.includes(d.device_type);
+        const isDoor = d.device_type === 'door';
+        const isTempSensor = d.device_type === 'temp_sensor' || (d.device_type === 'tapo_h100' && (d.temperature != null || d.humidity != null));
+        const nameEsc = (d.name || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        let controlHtml = '';
+        if (isSwitch) {
+          controlHtml = `
+            <div class="card-actions">
+              <button class="toggle-btn ${d.state === 'on' ? '' : 'off'}" data-id="${d.id}" data-type="${d.device_type}" data-action="on">ON</button>
+              <button class="toggle-btn ${d.state === 'off' ? '' : 'off'}" data-id="${d.id}" data-type="${d.device_type}" data-action="off">OFF</button>
+              ${showChart && (d.power != null || d.temperature != null) ? `<button class="toggle-btn secondary" onclick="showHistory(${d.id}, '${nameEsc}')">History</button>` : ''}
+              <button class="delete-btn" data-id="${d.id}" data-name="${nameEsc}">Delete</button>
+            </div>
+          `;
+        } else {
+          controlHtml = `
+            <div class="card-actions">
+              ${showChart && (d.temperature != null || d.power != null) ? `<button class="toggle-btn secondary" onclick="showHistory(${d.id}, '${nameEsc}')">History</button>` : ''}
+              <button class="delete-btn" data-id="${d.id}" data-name="${nameEsc}">Delete</button>
+            </div>
+          `;
+        }
+        return `
         <div class="card" data-id="${d.id}" data-type="${d.device_type}">
           <h3><span class="status ${d.online ? 'online' : 'offline'}"></span>${d.name}</h3>
           <div class="meta">${d.device_type} · ${d.source || '-'}</div>
           ${d.temperature != null ? `<div class="value">${d.temperature}°C</div>` : ''}
           ${d.humidity != null ? `<div class="value">${d.humidity}% RH</div>` : ''}
           ${d.power != null ? `<div class="value">${d.power} W</div>` : ''}
-          ${(d.device_type === 'tapo_switch' || d.device_type === 'tapo_plug' || d.device_type === 'ewelink') ?
-            `<button class="toggle-btn ${d.state === 'on' ? '' : 'off'}" data-id="${d.id}" data-type="${d.device_type}">${d.state === 'on' ? 'ON' : 'OFF'}</button>` : ''}
-          ${showChart && (d.temperature != null || d.power != null) ? `<button class="toggle-btn secondary" style="margin-left:8px" onclick="showHistory(${d.id}, '${d.name}')">History</button>` : ''}
+          ${d.battery != null ? `<div class="meta">Battery ${d.battery}%</div>` : ''}
+          ${isDoor && d.state ? `<div class="door-status ${d.state}">${d.state === 'open' ? 'Open' : 'Closed'}</div>` : ''}
+          ${controlHtml}
         </div>
-      `).join('');
+      `;
+      }).join('');
       grid.querySelectorAll('.toggle-btn[data-id]').forEach(btn => {
         btn.onclick = async () => {
           const id = btn.dataset.id;
           const dtype = btn.dataset.type;
+          const action = btn.dataset.action;
           if (dtype === 'ewelink') {
             const dev = filtered.find(x => x.id == id);
             const eid = dev.ewelink_device_id;
-            const turnOn = dev.state !== 'on';
+            const turnOn = action === 'on';
             await api('POST', '/ewelink/toggle', { device_id: eid, turn_on: turnOn });
           } else {
-            await api('POST', `/tapo/${id}/toggle`);
+            await api('POST', action === 'on' ? `/tapo/${id}/on` : `/tapo/${id}/off`);
           }
           loadAll();
+        };
+      });
+      grid.querySelectorAll('.delete-btn').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.id;
+          const name = btn.dataset.name || 'device';
+          if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+          const r = await api('DELETE', `/devices/${id}`);
+          if (r && r.deleted) loadAll();
+          else alert(r?.detail || 'Delete failed');
         };
       });
     }
@@ -330,6 +373,9 @@
       const datasets = [];
       if (data.some(d => d.temperature != null)) {
         datasets.push({ label: 'Temperature °C', data: data.map(d => d.temperature), borderColor: '#00d4aa', fill: false });
+      }
+      if (data.some(d => d.humidity != null)) {
+        datasets.push({ label: 'Humidity %', data: data.map(d => d.humidity), borderColor: '#4dabf7', fill: false });
       }
       if (data.some(d => d.power != null)) {
         datasets.push({ label: 'Power W', data: data.map(d => d.power), borderColor: '#ff6b6b', fill: false });

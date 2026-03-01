@@ -19,21 +19,41 @@ function renderNvrList(devices, api, loadAll) {
   }
   listEl.innerHTML = nvrs.map(nvr => {
     const children = cameras.filter(c => c.parent_device_id === nvr.id);
+    const nvrNameEsc = (nvr.name || '').replace(/"/g, '&quot;');
     return `
       <div class="nvr-item" data-nvr-id="${nvr.id}">
-        <h4><span class="status ${nvr.online ? 'online' : 'offline'}"></span>${nvr.name} ${nvr.ip_address ? '(' + nvr.ip_address + ')' : ''}</h4>
-        ${children.length ? children.map(cam => `
+        <h4>
+          <span class="status ${nvr.online ? 'online' : 'offline'}"></span>${nvr.name} ${nvr.ip_address ? '(' + nvr.ip_address + ')' : ''}
+          <button class="delete-btn" data-id="${nvr.id}" data-name="${nvrNameEsc}" style="margin-left:8px;padding:2px 8px;font-size:0.7rem">Delete</button>
+        </h4>
+        ${children.length ? children.map(cam => {
+          const camNameEsc = (cam.name || '').replace(/"/g, '&quot;');
+          return `
           <div class="nvr-camera-row" data-cam-id="${cam.id}">
             <span class="channel-info">
               <span class="status ${cam.online ? 'online' : 'offline'}"></span>
               Ch${getChannelFromExtra(cam.extra_data) || '-'}: ${cam.name}
             </span>
-            <button class="toggle-btn ${cam.state === 'on' ? '' : 'off'}" data-cam-id="${cam.id}" style="padding:4px 10px;font-size:0.75rem">${cam.state === 'on' ? 'ON' : 'OFF'}</button>
+            <span>
+              <button class="toggle-btn ${cam.state === 'on' ? '' : 'off'}" data-cam-id="${cam.id}" style="padding:4px 10px;font-size:0.75rem">${cam.state === 'on' ? 'ON' : 'OFF'}</button>
+              <button class="delete-btn" data-id="${cam.id}" data-name="${camNameEsc}" style="margin-left:4px;padding:2px 8px;font-size:0.7rem">Delete</button>
+            </span>
           </div>
-        `).join('') : '<p style="color:var(--muted);font-size:0.8rem;margin:0">No channels discovered</p>'}
+        `}).join('') : '<p style="color:var(--muted);font-size:0.8rem;margin:0">No channels discovered</p>'}
       </div>
     `;
   }).join('');
+  listEl.querySelectorAll('.nvr-item .delete-btn').forEach(btn => {
+    btn.onclick = async (e) => {
+      e.stopPropagation();
+      const id = btn.dataset.id;
+      const name = btn.dataset.name || 'device';
+      if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+      const r = await api('DELETE', '/devices/' + id);
+      if (r && r.deleted) loadAll();
+      else alert(r?.detail || 'Delete failed');
+    };
+  });
   listEl.querySelectorAll('.nvr-camera-row .toggle-btn').forEach(btn => {
     btn.onclick = async () => {
       const id = btn.dataset.camId;

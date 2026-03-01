@@ -1,15 +1,16 @@
-"""Device listing and history."""
+"""Device listing, history, and delete."""
 from datetime import datetime, timedelta
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, and_
+from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import delete, select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.deps import get_current_user_id
 from app.database import get_db
 from app.models.device import Device
 from app.models.sensor_history import SensorHistory
+from app.websocket import ws_manager
 
 router = APIRouter(prefix="/api/devices", tags=["devices"])
 
@@ -74,6 +75,7 @@ def device_to_dict(d: Device) -> dict:
         "power": d.power,
         "voltage": d.voltage,
         "current": d.current,
+        "battery": d.battery,
         "online": d.online,
         "ip_address": d.ip_address,
         "ewelink_device_id": d.ewelink_device_id,
@@ -83,3 +85,23 @@ def device_to_dict(d: Device) -> dict:
         "extra_data": d.extra_data,
         "last_seen": d.last_seen.isoformat() if d.last_seen else None,
     }
+
+
+@router.delete("/{device_id}")
+async def delete_device(
+    device_id: int,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Delete a device and its children (for hubs)."""
+    result = await session.execute(select(Device).where(Device.id == device_id))
+    dev = result.scalars().first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    # Delete children first (for hubs, NVRs)
+    await session.execute(delete(Device).where(Device.parent_device_id == device_id))
+    await session.delete(dev)
+    await session.flush()
+    # Broadcast so WebSocket clients refresh
+    await ws_manager.broadcast("device_update", {"device_id": device_id, "deleted": True})
+    return {"deleted": device_id}
