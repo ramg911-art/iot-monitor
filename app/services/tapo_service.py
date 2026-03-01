@@ -18,6 +18,7 @@ from app.models.device import (
     SOURCE_TAPO_WIFI,
     Device,
 )
+from app.config import get_settings
 from app.models.sensor_history import SensorHistory
 from app.services.history_service import (
     insert_history,
@@ -55,16 +56,29 @@ async def _get_device_by_tapo_id(session: AsyncSession, tapo_id: str) -> Optiona
     return result.scalars().first()
 
 
+def _tapo_discover_kwargs() -> dict:
+    """Return kwargs for Discover.discover_single (credentials if configured)."""
+    s = get_settings()
+    kw: dict = {}
+    if s.tapo_username and s.tapo_password:
+        kw["username"] = s.tapo_username
+        kw["password"] = s.tapo_password
+    return kw
+
+
 async def test_tapo_connectivity(ip_address: str) -> tuple[bool, str]:
     """Test connectivity to a Tapo device by IP. Returns (success, message)."""
     try:
         from kasa import Discover
 
-        dev = await Discover.discover_single(ip_address)
+        dev = await Discover.discover_single(ip_address, **_tapo_discover_kwargs())
         if dev is None:
             return False, "Device not found at IP"
-        await dev.update()
-        return True, f"Connected: {dev.model} - {dev.alias}"
+        try:
+            await dev.update()
+            return True, f"Connected: {dev.model} - {dev.alias}"
+        finally:
+            await dev.disconnect()
     except Exception as e:
         logger.exception("Tapo connectivity test failed for %s", ip_address)
         return False, str(e)
@@ -85,8 +99,9 @@ async def poll_tapo_device(
     if not device.ip_address:
         return False
 
+    kasa_dev = None
     try:
-        kasa_dev = await Discover.discover_single(device.ip_address)
+        kasa_dev = await Discover.discover_single(device.ip_address, **_tapo_discover_kwargs())
         if kasa_dev is None:
             device.online = False
             await session.flush()
@@ -101,6 +116,12 @@ async def poll_tapo_device(
         if broadcast_cb:
             await broadcast_cb("device", device)
         return True
+    finally:
+        if kasa_dev is not None:
+            try:
+                await kasa_dev.disconnect()
+            except Exception as ex:
+                logger.debug("Tapo disconnect failed: %s", ex)
 
     device.online = True
     device.last_seen = datetime.utcnow()
@@ -239,13 +260,20 @@ async def add_tapo_wifi_device(
     if existing:
         return None, "Device with this IP already exists"
 
+    kasa_dev = None
     try:
-        kasa_dev = await Discover.discover_single(ip_address)
+        kasa_dev = await Discover.discover_single(ip_address, **_tapo_discover_kwargs())
         if kasa_dev is None:
             return None, "Device not found at IP"
         await kasa_dev.update()
     except Exception as e:
         return None, f"Connection failed: {e}"
+    finally:
+        if kasa_dev is not None:
+            try:
+                await kasa_dev.disconnect()
+            except Exception as ex:
+                logger.debug("Tapo disconnect failed: %s", ex)
 
     dtype = _infer_tapo_device_type(kasa_dev)
     source = SOURCE_TAPO_H100 if dtype == DEVICE_TYPE_TAPO_H100 else SOURCE_TAPO_WIFI
@@ -277,16 +305,20 @@ async def toggle_tapo_device(session: AsyncSession, device: Device) -> bool:
 
     if not device.ip_address:
         raise ValueError("Device has no IP")
-    kasa_dev = await Discover.discover_single(device.ip_address)
+    kasa_dev = await Discover.discover_single(device.ip_address, **_tapo_discover_kwargs())
     if kasa_dev is None:
         raise ConnectionError("Device not found")
-    await kasa_dev.update()
-    if kasa_dev.is_on:
-        await kasa_dev.turn_off()
-    else:
-        await kasa_dev.turn_on()
-    await kasa_dev.update()
-    device.state = "on" if kasa_dev.is_on else "off"
-    device.online = True
-    await session.flush()
-    return kasa_dev.is_on
+    try:
+        await kasa_dev.update()
+        if kasa_dev.is_on:
+            await kasa_dev.turn_off()
+        else:
+            await kasa_dev.turn_on()
+        await kasa_dev.update()
+        new_state = kasa_dev.is_on
+        device.state = "on" if new_state else "off"
+        device.online = True
+        await session.flush()
+        return new_state
+    finally:
+        await kasa_dev.disconnect()

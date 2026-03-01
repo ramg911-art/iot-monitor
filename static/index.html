@@ -205,7 +205,8 @@
       if (body) opts.body = JSON.stringify(body);
       const r = await fetch(API + path, opts);
       if (r.status === 401) { token = null; localStorage.removeItem('iot_token'); showLogin(); return null; }
-      return r.ok ? r.json() : null;
+      const data = await r.json().catch(() => null);
+      return r.ok ? data : (data || { detail: 'Request failed' });
     }
 
     function showLogin() {

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     ewelink_redirect_uri: Optional[str] = None  # e.g. https://your-domain.com/api/ewelink/callback
     encryption_key: str = "change-me-32-bytes-base64!!"  # 32 bytes for Fernet
 
+    # Tapo cloud credentials (required for newer L510/L530 and some WiFi switches)
+    tapo_username: Optional[str] = None  # TP-Link/Tapo cloud email
+    tapo_password: Optional[str] = None
+
     # Polling intervals (seconds)
     camera_poll_interval: int = 10
     tapo_poll_interval: int = 30

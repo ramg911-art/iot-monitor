@@ -70,7 +70,7 @@ streams:
 ### Tapo
 
 - **H100 Hub**: Add by IP in the dashboard (same flow as switches – auto-detects hub vs plug)
-- **WiFi Switch/Plug**: Add by IP, test connectivity first
+- **WiFi Switch/Plug**: Add by IP, test connectivity first. Some newer models (L510/L530, certain WiFi switches) require `TAPO_USERNAME` and `TAPO_PASSWORD` (TP-Link cloud email/password) in `.env`
 
 ## Cloudflare Tunnel
 
