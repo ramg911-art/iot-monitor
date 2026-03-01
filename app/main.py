@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from app.config import get_settings
 from app.database import init_db
 from app.background.tasks import start_background_tasks
-from app.routers import auth, devices, tapo, ewelink, cameras, admin
+from app.routers import auth, devices, tapo, ewelink, cameras, admin, nvr
 from app.websocket import ws_manager
 from app.websocket.manager import heartbeat_loop
 
@@ -50,6 +50,7 @@ app.include_router(tapo.router)
 app.include_router(ewelink.router)
 app.include_router(cameras.router)
 app.include_router(admin.router)
+app.include_router(nvr.router)
 
 
 @app.get("/")

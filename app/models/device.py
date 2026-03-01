@@ -19,12 +19,15 @@ DEVICE_TYPE_TAPO_PLUG = "tapo_plug"
 DEVICE_TYPE_EWELINK = "ewelink"
 DEVICE_TYPE_DOOR = "door"  # H100 door sensor T110 (child of tapo_h100)
 DEVICE_TYPE_TEMP_SENSOR = "temp_sensor"  # H100 temp/humidity sensor T310
+DEVICE_TYPE_NVR = "nvr"  # Dahua NVR
+DEVICE_TYPE_NVR_CAMERA = "nvr_camera"  # NVR channel (child of nvr)
 
 # Source for device origin
 SOURCE_TAPO_H100 = "tapo_h100"
 SOURCE_TAPO_WIFI = "tapo_wifi"
 SOURCE_EWELINK = "ewelink"
 SOURCE_MANUAL = "manual"
+SOURCE_DAHUA = "dahua"
 
 
 class Device(Base):

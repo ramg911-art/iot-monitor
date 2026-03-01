@@ -80,5 +80,6 @@ def device_to_dict(d: Device) -> dict:
         "go2rtc_stream_id": d.go2rtc_stream_id,
         "rtsp_url": d.rtsp_url,
         "parent_device_id": d.parent_device_id,
+        "extra_data": d.extra_data,
         "last_seen": d.last_seen.isoformat() if d.last_seen else None,
     }
