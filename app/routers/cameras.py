@@ -136,6 +136,7 @@ async def list_nvr_cameras_paginated(
 async def go2rtc_proxy(path: str, request: Request):
     """
     Production-safe streaming proxy for go2rtc HLS.
+    Uses shared client; connection happens in route body so ConnectError returns 502.
     """
     from fastapi.responses import StreamingResponse, Response
 
@@ -148,15 +149,22 @@ async def go2rtc_proxy(path: str, request: Request):
         url = f"{base}/{path}"
 
     try:
-        async def stream_chunks():
-            async with go2rtc_client.stream("GET", url, follow_redirects=True) as upstream:
-                async for chunk in upstream.aiter_bytes():
-                    yield chunk
+        response = await go2rtc_client.get(url, follow_redirects=True)
+        content = response.content
+        status_code = response.status_code
+        content_type = response.headers.get(
+            "content-type", "application/octet-stream"
+        )
+
+        def iter_chunks():
+            chunk_size = 64 * 1024
+            for i in range(0, len(content), chunk_size):
+                yield content[i : i + chunk_size]
 
         return StreamingResponse(
-            stream_chunks(),
-            status_code=200,
-            headers={"Content-Type": "application/octet-stream"},
+            iter_chunks(),
+            status_code=status_code,
+            headers={"Content-Type": content_type},
         )
     except Exception as e:
         logging.warning("go2rtc proxy failed %s: %s", url, e)
