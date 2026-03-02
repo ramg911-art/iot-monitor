@@ -32,19 +32,24 @@ async def _poll_single_tapo_device(
     device: Device,
 ) -> None:
     """Poll a single Tapo device with timeout and error isolation."""
+    device_id = device.id
+    device_name = device.name
     try:
         await asyncio.wait_for(
             poll_tapo_device(session, device, broadcast_cb=_broadcast_device_update),
             timeout=15,
         )
     except asyncio.TimeoutError:
-        logger.warning("Tapo poll timeout for device %s (%s)", device.name, device.id)
+        logger.warning("Tapo poll timeout for device %s (%s)", device_name, device_id)
     except Exception as e:
-        logger.warning("Tapo poll failed for %s: %s", device.name, e)
-        # Mark offline on error
-        device.online = False
-        await session.flush()
-        await _broadcast_device_update(device)
+        logger.warning("Tapo poll failed for %s: %s", device_name, e)
+        try:
+            await session.rollback()
+            device.online = False
+            await session.flush()
+            await _broadcast_device_update(device)
+        except Exception as inner:
+            logger.warning("Could not mark device %s offline: %s", device_name, inner)
 
 
 async def _poll_tapo_with_broadcast(session: AsyncSession) -> None:
