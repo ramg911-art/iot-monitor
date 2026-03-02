@@ -1,10 +1,12 @@
 """Async database engine and session management."""
 import asyncio
 import logging
+import sqlite3
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncGenerator
 
-from sqlalchemy import event, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -14,6 +16,16 @@ from app.models import Base
 logger = logging.getLogger(__name__)
 
 _settings = get_settings()
+
+if _settings.database_url.startswith("sqlite"):
+    db_path = _settings.database_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
+    if db_path:
+        db_file = Path(db_path)
+        if db_file.parent.exists():
+            conn = sqlite3.connect(db_path)
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+            conn.close()
 
 
 def get_engine():
@@ -31,15 +43,6 @@ def get_engine():
 engine = get_engine()
 
 db_write_lock = asyncio.Lock()
-
-if "sqlite" in str(engine.url):
-
-    @event.listens_for(engine.sync_engine, "connect")
-    def set_sqlite_pragma(dbapi_connection, connection_record):
-        cursor = dbapi_connection.cursor()
-        cursor.execute("PRAGMA journal_mode=WAL;")
-        cursor.execute("PRAGMA synchronous=NORMAL;")
-        cursor.close()
 
 async_session_maker = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
