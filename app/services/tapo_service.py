@@ -95,6 +95,61 @@ def _infer_child_type(child: Any) -> str:
     return "temp_sensor"  # Default for unknown sensors
 
 
+def _extract_float(obj: Any, *attrs: str) -> Optional[float]:
+    """Try attrs in order; return first valid float."""
+    for attr in attrs:
+        val = getattr(obj, attr, None)
+        if val is not None:
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _extract_int(obj: Any, *attrs: str) -> Optional[int]:
+    """Try attrs in order; return first valid int."""
+    for attr in attrs:
+        val = getattr(obj, attr, None)
+        if val is not None:
+            try:
+                return int(float(val))
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
+def _extract_t310_sensor_values(child: Any) -> tuple[Optional[float], Optional[float], Optional[int]]:
+    """
+    Extract temperature, humidity, battery from T310 or similar temp/humidity sensor.
+    python-kasa may expose: direct attrs, or via modules (TemperatureSensor, BatterySensor).
+    T310 attributes: temperature, humidity, battery_level (or battery, battery_percentage).
+    """
+    temp = _extract_float(child, "temperature")
+    humidity = _extract_float(child, "humidity")
+    battery = _extract_int(child, "battery", "battery_level", "battery_percentage")
+    # Try modules (python-kasa module-based API)
+    modules = getattr(child, "modules", None)
+    if modules is not None:
+        try:
+            if isinstance(modules, dict):
+                ts = modules.get("TemperatureSensor") or modules.get("TemperatureControl")
+                bs = modules.get("BatterySensor")
+            else:
+                ts = getattr(modules, "TemperatureSensor", None) or getattr(modules, "TemperatureControl", None)
+                bs = getattr(modules, "BatterySensor", None)
+            if ts is not None:
+                if temp is None:
+                    temp = _extract_float(ts, "temperature", "current_temperature")
+                if humidity is None:
+                    humidity = _extract_float(ts, "humidity", "current_humidity")
+            if bs is not None and battery is None:
+                battery = _extract_int(bs, "battery", "battery_level", "battery_percentage")
+        except Exception:
+            pass
+    return temp, humidity, battery
+
+
 async def test_tapo_connectivity(ip_address: str) -> tuple[bool, str]:
     """Test connectivity to a Tapo device by IP. Returns (success, message)."""
     try:
@@ -119,10 +174,27 @@ async def test_tapo_connectivity(ip_address: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def _extract_door_state(child: Any) -> str:
+    """Extract open/closed from T110 door/contact sensor."""
+    is_open = getattr(child, "is_open", None)
+    if is_open is not None:
+        return "open" if is_open else "closed"
+    # ContactSensor module: contact_open, is_open
+    modules = getattr(child, "modules", None) or {}
+    if isinstance(modules, dict):
+        cs = modules.get("ContactSensor")
+        if cs is not None:
+            open_val = getattr(cs, "contact_open", None) or getattr(cs, "is_open", None)
+            if open_val is not None:
+                return "open" if open_val else "closed"
+    return "closed"
+
+
 async def _fetch_child_data(child: Any) -> ChildPollResult:
     """
     Network-only: fetch child state from kasa device. No DB access.
     Safe to run concurrently via asyncio.gather.
+    Extracts: temperature, humidity, battery (T310), state (T110 door).
     """
     child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
     child_alias = getattr(child, "alias", None) or getattr(child, "child_id", str(child_id))
@@ -143,16 +215,9 @@ async def _fetch_child_data(child: Any) -> ChildPollResult:
     humidity = None
     battery = None
     if child_type == "door":
-        state = "open" if getattr(child, "is_open", False) else "closed"
+        state = _extract_door_state(child)
     else:
-        temp = getattr(child, "temperature", None)
-        humidity = getattr(child, "humidity", None)
-        b = getattr(child, "battery", None)
-        if b is not None and isinstance(b, (int, float)):
-            try:
-                battery = int(b)
-            except (ValueError, TypeError):
-                pass
+        temp, humidity, battery = _extract_t310_sensor_values(child)
     return ChildPollResult(
         child_id=str(child_id),
         child_alias=child_alias,
@@ -212,23 +277,28 @@ async def _apply_child_to_db(
             if child_data.state and await should_store_door_state(session, dev.id, child_data.state):
                 await insert_history(session, dev.id, state=child_data.state, timestamp=now)
     else:
+        # T310 temp/humidity sensor: update all values, track change for broadcast
+        prev_temp, prev_hum, prev_bat = dev.temperature, dev.humidity, dev.battery
+        dev.temperature = child_data.temperature
+        dev.humidity = child_data.humidity
         if child_data.battery is not None:
             dev.battery = child_data.battery
-        if child_data.temperature is not None or child_data.humidity is not None:
-            if dev.temperature != child_data.temperature or dev.humidity != child_data.humidity:
-                dev.temperature = child_data.temperature
-                dev.humidity = child_data.humidity
-                changed = True
-                if child_data.temperature is not None and await should_store_temperature(
-                    session, dev.id, child_data.temperature, now
-                ):
-                    await insert_history(
-                        session,
-                        dev.id,
-                        temperature=child_data.temperature,
-                        humidity=child_data.humidity,
-                        timestamp=now,
-                    )
+        if (
+            prev_temp != child_data.temperature
+            or prev_hum != child_data.humidity
+            or (child_data.battery is not None and prev_bat != child_data.battery)
+        ):
+            changed = True
+        if child_data.temperature is not None and await should_store_temperature(
+            session, dev.id, child_data.temperature, now
+        ):
+            await insert_history(
+                session,
+                dev.id,
+                temperature=child_data.temperature,
+                humidity=child_data.humidity,
+                timestamp=now,
+            )
 
     await session.flush()
     if changed and broadcast_cb:
@@ -353,15 +423,24 @@ async def poll_tapo_device(
 
 
 def _infer_tapo_device_type(kasa_dev: Any) -> str:
-    """Infer device type from kasa device."""
+    """
+    Infer device type from kasa device.
+    Standalone Tapo WiFi switches/plugs → tapo_switch or tapo_plug.
+    H100 hub → tapo_h100.
+    python-kasa: SmartPlug, SmartStrip, SmartSwitch. Order matters: SmartStrip has children.
+    """
     dt = type(kasa_dev).__name__.lower()
     model = (getattr(kasa_dev, "model", "") or "").lower()
-    if "plug" in dt:
+    # Plugs and strips first (SmartStrip has children, must not become hub)
+    if "plug" in dt or "strip" in dt:
         return DEVICE_TYPE_TAPO_PLUG
-    if "switch" in dt and "hub" not in model and "h100" not in model:
-        return DEVICE_TYPE_TAPO_SWITCH
-    if "hub" in dt or "h100" in model or hasattr(kasa_dev, "children"):
+    # Hub (H100) - has children but is not plug/strip
+    if "hub" in dt or "h100" in model or (hasattr(kasa_dev, "children") and kasa_dev.children):
         return DEVICE_TYPE_TAPO_H100
+    # Wall switches
+    if "switch" in dt:
+        return DEVICE_TYPE_TAPO_SWITCH
+    # Default: treat unknown switchable devices as tapo_switch
     return DEVICE_TYPE_TAPO_SWITCH
 
 
@@ -431,7 +510,7 @@ async def add_tapo_wifi_device(
     session.add(dev)
     await session.flush()
 
-    # For hubs, create child device records
+    # For hubs, create child device records (use same extraction as poll)
     if dtype == DEVICE_TYPE_TAPO_H100 and hasattr(kasa_dev, "children") and kasa_dev.children:
         for child in kasa_dev.children:
             child_id = getattr(child, "device_id", None) or getattr(child, "id", None) or str(id(child))
@@ -448,15 +527,12 @@ async def add_tapo_wifi_device(
                 last_seen=now,
             )
             if child_type == "door":
-                child_dev.state = "open" if getattr(child, "is_open", False) else "closed"
+                child_dev.state = _extract_door_state(child)
             else:
-                child_dev.temperature = getattr(child, "temperature", None)
-                child_dev.humidity = getattr(child, "humidity", None)
-                child_dev.battery = getattr(child, "battery", None)
-                if isinstance(child_dev.battery, (int, float)):
-                    child_dev.battery = int(child_dev.battery)
-                else:
-                    child_dev.battery = None
+                temp, hum, bat = _extract_t310_sensor_values(child)
+                child_dev.temperature = temp
+                child_dev.humidity = hum
+                child_dev.battery = bat
             session.add(child_dev)
         await session.flush()
 
