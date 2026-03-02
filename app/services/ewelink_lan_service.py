@@ -1,9 +1,9 @@
 """eWeLink LAN service - UDP discovery, per-device WebSocket, LAN control with cloud fallback."""
 import asyncio
-import ipaddress
 import json
 import logging
 import random
+import socket
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -14,17 +14,38 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.database import async_session_maker
-from app.models.device import DEVICE_TYPE_EWELINK, SOURCE_EWELINK, Device
+from app.models.device import DEVICE_TYPE_EWELINK, Device
 from app.services.encryption_service import decrypt_token
 
 logger = logging.getLogger(__name__)
 
 LAN_WS_PORT = 8081
 DISCOVERY_INTERVAL = 60
-UDP_PROBE_PORT = 7000
-COMMON_SUBNETS = ["192.168.0.0/24", "192.168.1.0/24", "192.168.178.0/24"]
-SCAN_TIMEOUT = 1.5
-WS_CONNECT_TIMEOUT = 5
+UDP_PROBE_PORT = 6666
+UDP_LISTEN_TIMEOUT = 3
+
+
+def _get_local_broadcast_address() -> Optional[str]:
+    """Get local subnet broadcast address from server IP. Blocking - run in executor."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(("8.8.8.8", 80))
+            local_ip = s.getsockname()[0]
+        finally:
+            s.close()
+        parts = local_ip.split(".")
+        if len(parts) == 4:
+            return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+    except Exception:
+        pass
+    return None
+
+
+async def _get_broadcast_address() -> Optional[str]:
+    """Async: get broadcast address without blocking event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _get_local_broadcast_address)
 
 
 @dataclass
@@ -38,16 +59,10 @@ class DiscoveredDevice:
 def _user_online_payload(apikey: Optional[str] = None) -> dict:
     return {
         "action": "userOnline",
-        "userAgent": "app",
-        "version": 6,
-        "nonce": "".join(str(random.randint(0, 9)) for _ in range(15)),
-        "apkVesrion": "1.8",
-        "os": "ios",
-        "at": "at",
         "apikey": apikey or "apikey",
+        "nonce": "".join(str(random.randint(0, 9)) for _ in range(15)),
         "ts": str(int(time.time())),
-        "model": "iPhone10,6",
-        "romVersion": "11.1.2",
+        "version": 6,
         "sequence": str(time.time()).replace(".", ""),
     }
 
@@ -65,40 +80,8 @@ def _update_payload(device_id: str, params: dict, apikey: Optional[str] = None) 
     }
 
 
-async def _udp_discover() -> list[DiscoveredDevice]:
-    """Broadcast UDP probe and listen for Sonoff device responses."""
-    devices: list[DiscoveredDevice] = []
-    probe = json.dumps({"action": "probe", "ts": str(int(time.time()))}).encode()
-    seen: set[str] = set()
-
-    try:
-        transport, protocol = await asyncio.get_event_loop().create_datagram_endpoint(
-            lambda: _UDPDiscoveryProtocol(probe, devices, seen),
-            local_addr=("0.0.0.0", 0),
-            allow_broadcast=True,
-        )
-        try:
-            # Broadcast to common broadcast addresses
-            for subnet in COMMON_SUBNETS:
-                base = subnet.split("/")[0]
-                parts = base.split(".")
-                if len(parts) == 4:
-                    broadcast = ".".join(parts[:3] + ["255"])
-                    transport.sendto(probe, (broadcast, UDP_PROBE_PORT))
-                    transport.sendto(probe, (broadcast, LAN_WS_PORT))
-            transport.sendto(probe, ("255.255.255.255", UDP_PROBE_PORT))
-            transport.sendto(probe, ("255.255.255.255", LAN_WS_PORT))
-            await asyncio.sleep(3)
-        finally:
-            transport.close()
-    except Exception as e:
-        logger.debug("UDP discovery error: %s", e)
-
-    return devices
-
-
 class _UDPDiscoveryProtocol(asyncio.DatagramProtocol):
-    def __init__(self, _probe: bytes, devices: list, seen: set):
+    def __init__(self, devices: list, seen: set):
         self._devices = devices
         self._seen = seen
 
@@ -124,68 +107,37 @@ class _UDPDiscoveryProtocol(asyncio.DatagramProtocol):
             pass
 
 
-async def _tcp_scan_and_probe() -> list[DiscoveredDevice]:
-    """Scan subnets for port 8081, connect WebSocket to get deviceid."""
+async def _udp_discover() -> list[DiscoveredDevice]:
+    """Broadcast UDP probe and listen for Sonoff device responses."""
     devices: list[DiscoveredDevice] = []
-    seen_ids: set[str] = set()
-    sem = asyncio.Semaphore(32)
+    seen: set[str] = set()
+    broadcast_addr = await _get_broadcast_address()
+    if not broadcast_addr:
+        logger.warning("Could not determine local broadcast address, skipping UDP discovery")
+        return devices
 
-    async def probe_ip(ip_str: str) -> Optional[DiscoveredDevice]:
-        async with sem:
-            try:
-                uri = f"ws://{ip_str}:{LAN_WS_PORT}/"
-                async with asyncio.timeout(WS_CONNECT_TIMEOUT):
-                    async with websockets.connect(
-                        uri,
-                        subprotocols=["chat"],
-                        close_timeout=1,
-                        open_timeout=WS_CONNECT_TIMEOUT,
-                    ) as ws:
-                        await ws.send(json.dumps(_user_online_payload()))
-                        resp = await asyncio.wait_for(ws.recv(), timeout=3)
-                        data = json.loads(resp)
-                        device_id = data.get("deviceid")
-                        if device_id and device_id not in seen_ids:
-                            seen_ids.add(device_id)
-                            return DiscoveredDevice(
-                                deviceid=device_id,
-                                ip=ip_str,
-                                model=data.get("model"),
-                                firmware=data.get("fwVersion"),
-                            )
-            except Exception:
-                pass
-            return None
+    probe = json.dumps({"action": "probe", "ts": str(int(time.time()))}).encode()
 
-    all_ips: list[str] = []
-    for subnet in COMMON_SUBNETS:
+    try:
+        transport, _ = await asyncio.get_event_loop().create_datagram_endpoint(
+            lambda: _UDPDiscoveryProtocol(devices, seen),
+            local_addr=("0.0.0.0", 0),
+            allow_broadcast=True,
+        )
         try:
-            net = ipaddress.ipv4_network(subnet, strict=False)
-            all_ips.extend(str(ip) for ip in net.hosts())
-        except Exception:
-            pass
-
-    # Check port 8081 first (async connect)
-    tasks = []
-    for ip in all_ips:
-        tasks.append(probe_ip(ip))
-
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for r in results:
-        if isinstance(r, DiscoveredDevice):
-            devices.append(r)
-        elif isinstance(r, Exception):
-            logger.debug("Probe error: %s", r)
+            transport.sendto(probe, (broadcast_addr, UDP_PROBE_PORT))
+            await asyncio.sleep(UDP_LISTEN_TIMEOUT)
+        finally:
+            transport.close()
+    except Exception as e:
+        logger.debug("UDP discovery error: %s", e)
 
     return devices
 
 
 async def discover_lan_devices() -> list[DiscoveredDevice]:
-    """Discover Sonoff/eWeLink devices on LAN. UDP first, then TCP scan fallback."""
-    found = await _udp_discover()
-    if not found:
-        found = await _tcp_scan_and_probe()
-    return found
+    """Discover Sonoff/eWeLink devices on LAN via UDP broadcast only."""
+    return await _udp_discover()
 
 
 async def _upsert_discovered(
@@ -380,6 +332,21 @@ class EweLinkLanService:
                 )
                 if dev:
                     matched_ids.add(d.deviceid)
+
+            # Set lan_online=False for eWeLink devices not found this cycle
+            result = await session.execute(
+                select(Device).where(
+                    Device.device_type == DEVICE_TYPE_EWELINK,
+                    Device.ewelink_device_id.isnot(None),
+                    Device.lan_online == True,
+                )
+            )
+            for dev in result.scalars().all():
+                if dev.ewelink_device_id and dev.ewelink_device_id not in matched_ids:
+                    dev.lan_online = False
+                    dev.lan_ip = None
+                    await self._broadcast_device(dev)
+
             await session.commit()
 
         to_mark_offline: list[str] = []
@@ -407,7 +374,7 @@ class EweLinkLanService:
                     self._connections[d.deviceid] = conn
                     asyncio.create_task(conn.start())
 
-            # Stop connections for devices not found or no longer matched
+            # Stop connections for devices not found this cycle
             for did, conn in list(self._connections.items()):
                 if did not in matched_ids:
                     await conn.stop()
@@ -422,6 +389,7 @@ class EweLinkLanService:
                 dev = result.scalars().first()
                 if dev:
                     dev.lan_online = False
+                    dev.lan_ip = None
                     await session.commit()
                     await self._broadcast_device(dev)
 
