@@ -25,27 +25,15 @@ UDP_PROBE_PORT = 6666
 UDP_LISTEN_TIMEOUT = 3
 
 
-def _get_local_broadcast_address() -> Optional[str]:
-    """Get local subnet broadcast address from server IP. Blocking - run in executor."""
+def get_broadcast_address() -> str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        try:
-            s.connect(("8.8.8.8", 80))
-            local_ip = s.getsockname()[0]
-        finally:
-            s.close()
-        parts = local_ip.split(".")
-        if len(parts) == 4:
-            return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-    except Exception:
-        pass
-    return None
-
-
-async def _get_broadcast_address() -> Optional[str]:
-    """Async: get broadcast address without blocking event loop."""
-    loop = asyncio.get_event_loop()
-    return await loop.run_in_executor(None, _get_local_broadcast_address)
+        s.connect(("8.8.8.8", 80))
+        local_ip = s.getsockname()[0]
+    finally:
+        s.close()
+    parts = local_ip.split(".")
+    return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
 
 
 @dataclass
@@ -111,21 +99,17 @@ async def _udp_discover() -> list[DiscoveredDevice]:
     """Broadcast UDP probe and listen for Sonoff device responses."""
     devices: list[DiscoveredDevice] = []
     seen: set[str] = set()
-    broadcast_addr = await _get_broadcast_address()
-    if not broadcast_addr:
-        logger.warning("Could not determine local broadcast address, skipping UDP discovery")
-        return devices
-
     probe = json.dumps({"action": "probe", "ts": str(int(time.time()))}).encode()
 
     try:
+        broadcast = get_broadcast_address()
         transport, _ = await asyncio.get_event_loop().create_datagram_endpoint(
             lambda: _UDPDiscoveryProtocol(devices, seen),
             local_addr=("0.0.0.0", 0),
             allow_broadcast=True,
         )
         try:
-            transport.sendto(probe, (broadcast_addr, UDP_PROBE_PORT))
+            transport.sendto(probe, (broadcast, UDP_PROBE_PORT))
             await asyncio.sleep(UDP_LISTEN_TIMEOUT)
         finally:
             transport.close()
