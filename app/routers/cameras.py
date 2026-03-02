@@ -1,7 +1,7 @@
 """Camera management - go2rtc stream list and playback URLs."""
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -12,6 +12,12 @@ from app.database import async_session_maker
 from app.models.device import Device, DEVICE_TYPE_NVR_CAMERA
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+
+def _proxy_url(path: str, query: str = "") -> str:
+    """Build proxy URL for frontend (same-origin, avoids CORS/unknown host)."""
+    q = f"?{query}" if query else ""
+    return f"/api/cameras/go2rtc-proxy/{path}{q}"
 
 
 @router.get("/streams")
@@ -94,7 +100,7 @@ async def list_nvr_cameras_paginated(
         items = []
         for cam in cams:
             stream_name = cam.stream_name or cam.go2rtc_stream_id or f"nvr_ch{cam.channel_number or cam.id}"
-            hls_url = f"{settings.go2rtc_url}/api/stream.m3u8?src={stream_name}"
+            hls_url = _proxy_url("api/stream.m3u8", f"src={stream_name}")
             parent_name = None
             if cam.parent_device_id:
                 p = await session.get(Device, cam.parent_device_id)
@@ -117,3 +123,36 @@ async def list_nvr_cameras_paginated(
             "pages": (total + per_page - 1) // per_page if total > 0 else 1,
             "go2rtc_url": settings.go2rtc_url,
         }
+
+
+@router.get("/go2rtc-proxy/{path:path}")
+async def go2rtc_proxy(
+    request: Request,
+    path: str,
+    user_id: int = Depends(get_current_user_id),
+):
+    """Proxy go2rtc streams to avoid CORS and unknown host (go2rtc is Docker-internal)."""
+    from fastapi.responses import Response, JSONResponse
+
+    settings = get_settings()
+    url = f"{settings.go2rtc_url.rstrip('/')}/{path}"
+    if request.url.query:
+        url = f"{url}?{request.url.query}"
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url)
+            media_type = resp.headers.get("content-type", "application/vnd.apple.mpegurl")
+            return Response(
+                content=resp.content,
+                status_code=resp.status_code,
+                media_type=media_type,
+                headers={
+                    k: v for k, v in resp.headers.items()
+                    if k.lower() in ("content-type", "content-length", "cache-control")
+                },
+            )
+    except Exception as e:
+        return JSONResponse(
+            status_code=502,
+            content={"detail": f"go2rtc proxy error: {str(e)}"},
+        )
