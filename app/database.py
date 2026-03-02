@@ -3,7 +3,6 @@ import asyncio
 import logging
 import sqlite3
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import AsyncGenerator
 
 from sqlalchemy import text
@@ -20,12 +19,14 @@ _settings = get_settings()
 if _settings.database_url.startswith("sqlite"):
     db_path = _settings.database_url.replace("sqlite+aiosqlite:///", "").replace("sqlite:///", "")
     if db_path:
-        db_file = Path(db_path)
-        if db_file.parent.exists():
-            conn = sqlite3.connect(db_path)
+        try:
+            conn = sqlite3.connect(db_path, timeout=1)
             conn.execute("PRAGMA journal_mode=WAL;")
             conn.execute("PRAGMA synchronous=NORMAL;")
             conn.close()
+            logger.info("SQLite WAL mode enabled.")
+        except Exception as e:
+            logger.warning("Could not enable WAL mode: %s", e)
 
 
 def get_engine():
