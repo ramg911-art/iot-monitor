@@ -30,10 +30,10 @@ async def _broadcast_device_update(device: Device) -> None:
 async def _poll_single_tapo_device(
     session: AsyncSession,
     device: Device,
+    device_id: int,
+    device_name: str,
 ) -> None:
     """Poll a single Tapo device with timeout and error isolation."""
-    device_id = device.id
-    device_name = device.name
     try:
         await asyncio.wait_for(
             poll_tapo_device(session, device, broadcast_cb=_broadcast_device_update),
@@ -50,6 +50,10 @@ async def _poll_single_tapo_device(
             await _broadcast_device_update(device)
         except Exception as inner:
             logger.warning("Could not mark device %s offline: %s", device_name, inner)
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
 
 async def _poll_tapo_with_broadcast(session: AsyncSession) -> None:
@@ -64,9 +68,12 @@ async def _poll_tapo_with_broadcast(session: AsyncSession) -> None:
     result = await session.execute(stmt)
     devices = result.scalars().all()
 
+    # Load id/name into memory before polling (avoids lazy load if session is rolled back)
+    device_infos = [(d.id, d.name) for d in devices]
+
     # Poll devices with small stagger to avoid overwhelming network
-    for dev in devices:
-        await _poll_single_tapo_device(session, dev)
+    for dev, (dev_id, dev_name) in zip(devices, device_infos):
+        await _poll_single_tapo_device(session, dev, dev_id, dev_name)
         await asyncio.sleep(0.5)  # Stagger to avoid DDoS
 
 
