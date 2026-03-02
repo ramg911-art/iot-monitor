@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -124,17 +125,22 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
-async def commit_with_retry(session: AsyncSession, max_retries: int = 3) -> None:
-    """Commit with retry on database locked."""
-    for attempt in range(max_retries):
+async def commit_with_retry(session, retries: int = 3, delay: float = 0.2):
+    for attempt in range(retries):
         try:
             await session.commit()
             return
-        except Exception as e:
-            err_str = str(e).lower()
-            if hasattr(e, "orig") and e.orig:
-                err_str += " " + str(e.orig).lower()
-            if "database is locked" in err_str and attempt < max_retries - 1:
-                await asyncio.sleep(0.2 * (attempt + 1))
+        except OperationalError as e:
+            if "database is locked" in str(e):
+                await session.rollback()
+                if attempt < retries - 1:
+                    await asyncio.sleep(delay)
+                    continue
+                else:
+                    raise
             else:
+                await session.rollback()
                 raise
+        except Exception:
+            await session.rollback()
+            raise
