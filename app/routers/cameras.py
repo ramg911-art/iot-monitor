@@ -1,4 +1,5 @@
 """Camera management - go2rtc stream list and playback URLs."""
+import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -130,7 +131,7 @@ async def go2rtc_proxy(request: Request, path: str):
     """
     Proxy requests to go2rtc instance.
     Required for HLS streaming (.m3u8 + .ts segments).
-    Must stream bytes instead of buffering.
+    Reads fully while client is open, then streams chunks (avoids closed-connection 502).
     No JWT auth - HLS/video requests do not send headers.
     """
     from fastapi.responses import StreamingResponse, JSONResponse
@@ -141,16 +142,24 @@ async def go2rtc_proxy(request: Request, path: str):
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(url, follow_redirects=True)
+            content = response.content
+            status_code = response.status_code
+            content_type = response.headers.get(
+                "content-type", "application/octet-stream"
+            )
+
+        def iter_chunks():
+            chunk_size = 64 * 1024
+            for i in range(0, len(content), chunk_size):
+                yield content[i : i + chunk_size]
+
         return StreamingResponse(
-            response.aiter_bytes(),
-            status_code=response.status_code,
-            headers={
-                "Content-Type": response.headers.get(
-                    "content-type", "application/octet-stream"
-                )
-            },
+            iter_chunks(),
+            status_code=status_code,
+            headers={"Content-Type": content_type},
         )
     except Exception as e:
+        logging.warning("go2rtc proxy failed %s: %s", url, e)
         return JSONResponse(
             status_code=502,
             content={"detail": f"go2rtc proxy error: {str(e)}"},
