@@ -32,18 +32,14 @@ engine = get_engine()
 
 db_write_lock = asyncio.Lock()
 
-
-def _set_sqlite_pragma(dbapi_conn, connection_record):
-    """Set WAL mode on each new SQLite connection. Runs at connect time, avoids lock."""
-    cursor = dbapi_conn.cursor()
-    cursor.execute("PRAGMA journal_mode=WAL")
-    cursor.execute("PRAGMA synchronous=NORMAL")
-    cursor.close()
-
-
 if "sqlite" in str(engine.url):
-    event.listen(engine.sync_engine, "connect", _set_sqlite_pragma)
-    logger.info("SQLite WAL mode will be set on first connect")
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def set_sqlite_pragma(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL;")
+        cursor.execute("PRAGMA synchronous=NORMAL;")
+        cursor.close()
 
 async_session_maker = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
