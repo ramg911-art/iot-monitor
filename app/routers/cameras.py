@@ -61,7 +61,11 @@ async def list_streams(
         )
         nvr_cams = result.scalars().all()
         for cam in nvr_cams:
-            stream_id = cam.go2rtc_stream_id or f"nvr-{cam.id}"
+            stream_id = (
+                f"nvr_ch{cam.channel_number}"
+                if cam.channel_number is not None
+                else (cam.go2rtc_stream_id or cam.stream_name or f"nvr_ch{cam.id}")
+            )
             hls_url = f"{settings.go2rtc_url}/api/hls/{stream_id}/index.m3u8"
             html_url = f"{settings.go2rtc_url}/api/stream.html?src={stream_id}"
             parent_name = None
@@ -106,8 +110,13 @@ async def list_nvr_cameras_paginated(
         cams = result.scalars().all()
         items = []
         for cam in cams:
-            stream_name = cam.stream_name or cam.go2rtc_stream_id or f"nvr_ch{cam.channel_number or cam.id}"
-            hls_url = _proxy_url("api/stream.m3u8", f"src={stream_name}")
+            # go2rtc expects nvr_ch1, nvr_ch2, etc. Prefer channel_number over DB stream_name.
+            go2rtc_src = (
+                f"nvr_ch{cam.channel_number}"
+                if cam.channel_number is not None
+                else (cam.stream_name or cam.go2rtc_stream_id or f"nvr_ch{cam.id}")
+            )
+            hls_url = _proxy_url("api/stream.m3u8", f"src={go2rtc_src}")
             parent_name = None
             if cam.parent_device_id:
                 p = await session.get(Device, cam.parent_device_id)
@@ -116,7 +125,7 @@ async def list_nvr_cameras_paginated(
                 "id": cam.id,
                 "name": cam.name,
                 "channel_number": cam.channel_number,
-                "stream_name": stream_name,
+                "stream_name": go2rtc_src,
                 "hls_url": hls_url,
                 "parent_name": parent_name,
                 "online": cam.online,
