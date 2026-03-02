@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.database import init_db
 from app.background.tasks import start_background_tasks
 from app.routers import auth, devices, tapo, ewelink, cameras, admin, nvr
+from app.services.ewelink_lan_service import ewelink_lan_service
 from app.websocket import ws_manager
 from app.websocket.manager import heartbeat_loop
 
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     tasks = await start_background_tasks()
     _bg_tasks.extend(tasks)
     yield
+    await ewelink_lan_service.stop()
     for t in _bg_tasks:
         t.cancel()
     logger.info("Shutdown complete")

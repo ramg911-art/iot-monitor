@@ -1,4 +1,4 @@
-"""Background polling tasks - Tapo, cameras."""
+"""Background polling tasks - Tapo, cameras, eWeLink LAN."""
 import asyncio
 import logging
 from typing import Optional
@@ -16,6 +16,7 @@ from app.models.device import (
     DEVICE_TYPE_TAPO_PLUG,
 )
 from app.services.tapo_service import poll_tapo_device
+from app.services.ewelink_lan_service import ewelink_lan_service
 from app.websocket import ws_manager
 
 logger = logging.getLogger(__name__)
@@ -107,6 +108,12 @@ async def camera_poll_loop() -> None:
 
 async def start_background_tasks() -> list[asyncio.Task]:
     """Start polling tasks. Returns list of tasks."""
+    async def _broadcast_device(device: Device) -> None:
+        await ws_manager.broadcast_device_update(device)
+
+    ewelink_lan_service.set_broadcast_callback(_broadcast_device)
+    await ewelink_lan_service.start()
+
     tasks = [
         asyncio.create_task(tapo_poll_loop()),
         asyncio.create_task(camera_poll_loop()),

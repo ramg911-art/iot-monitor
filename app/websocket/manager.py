@@ -24,6 +24,9 @@ def _build_device_update_payload(device: Any) -> dict:
             "humidity": device.humidity,
             "battery": device.battery if hasattr(device, "battery") else None,
             "online": device.online,
+            "lan_ip": getattr(device, "lan_ip", None),
+            "lan_online": getattr(device, "lan_online", False),
+            "prefer_lan": getattr(device, "prefer_lan", True),
         },
     }
 

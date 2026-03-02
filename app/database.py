@@ -44,6 +44,15 @@ async def _run_schema_migrations(conn) -> None:
         if "battery" not in columns:
             connection.execute(text("ALTER TABLE devices ADD COLUMN battery INTEGER"))
             logger.info("Added battery column to devices")
+        for col, sql in [
+            ("lan_ip", "ALTER TABLE devices ADD COLUMN lan_ip VARCHAR(45)"),
+            ("lan_online", "ALTER TABLE devices ADD COLUMN lan_online BOOLEAN DEFAULT 0"),
+            ("prefer_lan", "ALTER TABLE devices ADD COLUMN prefer_lan BOOLEAN DEFAULT 1"),
+            ("ewelink_apikey_encrypted", "ALTER TABLE devices ADD COLUMN ewelink_apikey_encrypted TEXT"),
+        ]:
+            if col not in columns:
+                connection.execute(text(sql))
+                logger.info("Added %s column to devices", col)
 
     await conn.run_sync(_migrate)
 

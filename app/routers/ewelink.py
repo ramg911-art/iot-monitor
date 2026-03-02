@@ -1,4 +1,5 @@
-"""eWeLink OAuth, device sync, toggle, webhook."""
+"""eWeLink OAuth, device sync, toggle, webhook, LAN discovery."""
+import asyncio
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -17,6 +18,7 @@ from app.services.ewelink_service import (
     toggle_ewelink_device,
     parse_webhook_payload,
 )
+from app.services.ewelink_lan_service import ewelink_lan_service
 from app.websocket import ws_manager
 
 router = APIRouter(prefix="/api/ewelink", tags=["ewelink"])
@@ -56,6 +58,41 @@ async def oauth_callback(
     return RedirectResponse(url="/?ewelink=success", status_code=302)
 
 
+class PreferLanRequest(BaseModel):
+    device_id: str
+    prefer_lan: bool
+
+
+@router.post("/scan-lan")
+async def scan_lan_devices(
+    user_id: int = Depends(get_current_user_id),
+):
+    """Manually trigger LAN discovery for Sonoff devices."""
+    found = await ewelink_lan_service.run_discovery()
+    return {
+        "count": len(found),
+        "devices": [{"deviceid": d.deviceid, "ip": d.ip, "model": d.model} for d in found],
+    }
+
+
+@router.post("/prefer-lan")
+async def set_prefer_lan(
+    data: PreferLanRequest,
+    user_id: int = Depends(get_current_user_id),
+    session: AsyncSession = Depends(get_db),
+):
+    """Set prefer_lan for an eWeLink device."""
+    result = await session.execute(
+        select(Device).where(Device.ewelink_device_id == data.device_id)
+    )
+    dev = result.scalars().first()
+    if not dev:
+        raise HTTPException(status_code=404, detail="Device not found")
+    dev.prefer_lan = data.prefer_lan
+    await session.flush()
+    return {"device_id": data.device_id, "prefer_lan": data.prefer_lan}
+
+
 @router.post("/sync")
 async def sync_devices(
     user_id: int = Depends(get_current_user_id),
@@ -71,10 +108,15 @@ async def sync_devices(
             "power": device.power,
             "online": device.online,
             "ewelink_device_id": device.ewelink_device_id,
+            "lan_ip": getattr(device, "lan_ip", None),
+            "lan_online": getattr(device, "lan_online", False),
+            "prefer_lan": getattr(device, "prefer_lan", True),
         })
     devices, err = await sync_ewelink_devices(session, user_id, broadcast)
     if err:
         raise HTTPException(status_code=502, detail=err)
+    # Trigger LAN discovery so newly synced devices get picked up quickly
+    asyncio.create_task(ewelink_lan_service.run_discovery())
     return {"devices": devices, "count": len(devices)}
 
 
@@ -84,7 +126,31 @@ async def toggle_device(
     user_id: int = Depends(get_current_user_id),
     session: AsyncSession = Depends(get_db),
 ):
-    """Toggle eWeLink device."""
+    """Toggle eWeLink device. Uses LAN when available and prefer_lan is True."""
+    result = await session.execute(select(Device).where(Device.ewelink_device_id == data.device_id))
+    dev = result.scalars().first()
+    params_value = "on" if data.turn_on else "off"
+    params = {"switch": params_value}
+
+    if dev and getattr(dev, "lan_online", False) and getattr(dev, "prefer_lan", True):
+        ok, err = await ewelink_lan_service.send_lan_command(data.device_id, params)
+        if ok:
+            if dev:
+                dev.state = params_value
+                await session.flush()
+            result = await session.execute(select(Device).where(Device.ewelink_device_id == data.device_id))
+            dev = result.scalars().first()
+            if dev:
+                await ws_manager.broadcast("device", {
+                    "id": dev.id,
+                    "name": dev.name,
+                    "device_type": dev.device_type,
+                    "state": dev.state,
+                    "power": dev.power,
+                    "online": dev.online,
+                })
+            return {"state": params_value}
+        # LAN failed, fall through to cloud
     ok, err = await toggle_ewelink_device(session, user_id, data.device_id, data.turn_on)
     if not ok:
         raise HTTPException(status_code=502, detail=err or "Toggle failed")

@@ -278,6 +278,18 @@ async def sync_ewelink_devices(
         if power is not None:
             dev.power = float(power) if isinstance(power, (int, float, str)) else None
         dev.online = thing.get("online", True)
+
+        # Store apikey for LAN mode auth (encrypted)
+        apikey = (
+            thing.get("apikey")
+            or thing.get("apiKey")
+            or thing.get("devicekey")
+            or thing.get("deviceKey")
+            or item.get("apikey")
+            or item.get("apiKey")
+        )
+        if apikey and isinstance(apikey, str) and len(apikey) > 1:
+            dev.ewelink_apikey_encrypted = encrypt_token(apikey)
         dev.extra_data = json.dumps(params) if params else None
         dev.name = thing.get("name", dev.name)
         dev.last_seen = datetime.utcnow()
@@ -331,6 +343,9 @@ def _device_to_dict(d: Device) -> dict:
         "online": d.online,
         "power": d.power,
         "ewelink_device_id": d.ewelink_device_id,
+        "lan_ip": getattr(d, "lan_ip", None),
+        "lan_online": getattr(d, "lan_online", False),
+        "prefer_lan": getattr(d, "prefer_lan", True),
     }
 
 

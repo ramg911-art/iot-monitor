@@ -152,6 +152,11 @@
     .door-status { font-size: 1rem; padding: 4px 10px; border-radius: var(--radius); display: inline-block; margin-top: 4px; }
     .door-status.open { background: rgba(255,107,107,0.2); color: var(--danger); }
     .door-status.closed { background: rgba(81,207,102,0.2); color: var(--success); }
+    .lan-badge { font-size: 0.65rem; padding: 2px 6px; border-radius: 4px; margin-left: 6px; }
+    .lan-badge.lan-online { background: var(--success); color: var(--bg); }
+    .lan-badge.lan-cloud { background: #e6a23c; color: var(--bg); }
+    .prefer-lan-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--muted); cursor: pointer; margin-left: 8px; }
+    .prefer-lan-toggle input { cursor: pointer; }
   </style>
 </head>
 <body>
@@ -193,7 +198,8 @@
       <div class="section">
         <h2>eWeLink Devices</h2>
         <button id="ewelink-connect" style="margin-right:8px;margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Connect eWeLink</button>
-        <button id="ewelink-sync" style="margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Sync eWeLink</button>
+        <button id="ewelink-sync" style="margin-right:8px;margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Sync eWeLink</button>
+        <button id="ewelink-scan-lan" style="margin-bottom:12px;padding:8px 16px;background:var(--border);border:none;border-radius:var(--radius);color:var(--text);cursor:pointer;font-family:inherit">Scan LAN for Sonoff Devices</button>
         <div id="ewelink-grid" class="grid"></div>
       </div>
     </div>
@@ -323,10 +329,18 @@
             </div>
           `;
         }
+        const lanBadge = (d.device_type === 'ewelink') ? (d.lan_online ? '<span class="lan-badge lan-online" title="LAN connected">LAN</span>' : '<span class="lan-badge lan-cloud" title="Cloud only">LAN</span>') : '';
+        const preferLanToggle = (d.device_type === 'ewelink' && d.ewelink_device_id) ? `
+          <label class="prefer-lan-toggle" title="Prefer LAN when available">
+            <input type="checkbox" ${d.prefer_lan !== false ? 'checked' : ''} data-eid="${d.ewelink_device_id || ''}">
+            <span>Prefer LAN</span>
+          </label>
+        ` : '';
         return `
         <div class="card" data-id="${d.id}" data-type="${d.device_type}">
-          <h3><span class="status ${d.online ? 'online' : 'offline'}"></span>${d.name}</h3>
-          <div class="meta">${d.device_type} · ${d.source || '-'}</div>
+          <h3><span class="status ${d.online ? 'online' : 'offline'}"></span>${d.name} ${lanBadge}</h3>
+          <div class="meta">${d.device_type} · ${d.source || '-'}${d.lan_ip ? ' · ' + d.lan_ip : ''}</div>
+          ${preferLanToggle}
           ${d.temperature != null ? `<div class="value">${d.temperature}°C</div>` : ''}
           ${d.humidity != null ? `<div class="value">${d.humidity}% RH</div>` : ''}
           ${d.power != null ? `<div class="value">${d.power} W</div>` : ''}
@@ -360,6 +374,14 @@
           const r = await api('DELETE', `/devices/${id}`);
           if (r && r.deleted) loadAll();
           else alert(r?.detail || 'Delete failed');
+        };
+      });
+      grid.querySelectorAll('.prefer-lan-toggle input').forEach(cb => {
+        cb.onchange = async () => {
+          const eid = cb.dataset.eid;
+          if (!eid) return;
+          await api('POST', '/ewelink/prefer-lan', { device_id: eid, prefer_lan: cb.checked });
+          loadAll();
         };
       });
     }
@@ -430,6 +452,24 @@
     document.getElementById('ewelink-sync').onclick = async () => {
       await api('POST', '/ewelink/sync');
       loadAll();
+    };
+
+    document.getElementById('ewelink-scan-lan').onclick = async () => {
+      const btn = document.getElementById('ewelink-scan-lan');
+      btn.disabled = true;
+      btn.textContent = 'Scanning...';
+      try {
+        const r = await api('POST', '/ewelink/scan-lan');
+        if (r) {
+          loadAll();
+          if (r.count > 0) btn.textContent = `Scan complete (${r.count} found)`;
+          else btn.textContent = 'Scan LAN for Sonoff Devices';
+        }
+      } finally {
+        btn.disabled = false;
+        if (btn.textContent === 'Scanning...') btn.textContent = 'Scan LAN for Sonoff Devices';
+      }
+      setTimeout(() => { if (btn.textContent.includes('found')) btn.textContent = 'Scan LAN for Sonoff Devices'; }, 3000);
     };
 
     document.getElementById('nvr-add').onclick = () => document.getElementById('nvr-add-modal').classList.add('open');

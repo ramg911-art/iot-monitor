@@ -42,9 +42,16 @@ class Device(Base):
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)  # IPv6 support
     rtsp_url: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
     go2rtc_stream_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    ewelink_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    ewelink_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)  # deviceid
     tapo_device_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     parent_device_id: Mapped[Optional[int]] = mapped_column(ForeignKey("devices.id"), nullable=True)
+    # eWeLink LAN auth - encrypted, from cloud sync
+    ewelink_apikey_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # LAN mode (eWeLink/Sonoff local control)
+    lan_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
+    lan_online: Mapped[bool] = mapped_column(default=False)
+    prefer_lan: Mapped[bool] = mapped_column(default=True)
 
     # Current state (denormalized for quick access)
     state: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)  # on, off, open, closed
