@@ -4,7 +4,7 @@ import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 
@@ -33,14 +33,17 @@ engine = get_engine()
 db_write_lock = asyncio.Lock()
 
 
-async def enable_sqlite_wal() -> None:
-    """Enable WAL mode for SQLite to reduce lock contention."""
-    if "sqlite" in str(engine.url):
-        async with engine.begin() as conn:
-            await conn.execute(text("PRAGMA journal_mode=WAL;"))
-            await conn.execute(text("PRAGMA synchronous=NORMAL;"))
-        logger.info("SQLite WAL mode enabled")
+def _set_sqlite_pragma(dbapi_conn, connection_record):
+    """Set WAL mode on each new SQLite connection. Runs at connect time, avoids lock."""
+    cursor = dbapi_conn.cursor()
+    cursor.execute("PRAGMA journal_mode=WAL")
+    cursor.execute("PRAGMA synchronous=NORMAL")
+    cursor.close()
 
+
+if "sqlite" in str(engine.url):
+    event.listen(engine.sync_engine, "connect", _set_sqlite_pragma)
+    logger.info("SQLite WAL mode will be set on first connect")
 
 async_session_maker = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
@@ -78,7 +81,6 @@ async def _run_schema_migrations(conn) -> None:
 
 async def init_db() -> None:
     """Create all tables and default admin user."""
-    await enable_sqlite_wal()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_schema_migrations(conn)
