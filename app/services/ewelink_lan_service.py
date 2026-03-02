@@ -3,6 +3,7 @@ import asyncio
 import json
 import logging
 import time
+from types import SimpleNamespace
 from typing import Callable, Optional
 
 import websockets
@@ -43,6 +44,23 @@ def _user_online_params() -> dict:
         "ts": str(int(time.time())),
         "version": 6,
     }
+
+
+def _device_to_broadcast_payload(dev: Device) -> SimpleNamespace:
+    """Extract attributes while session is active. Prevents greenlet errors when broadcasting."""
+    return SimpleNamespace(
+        id=dev.id,
+        device_type=dev.device_type,
+        state=getattr(dev, "state", None),
+        power=getattr(dev, "power", None),
+        temperature=getattr(dev, "temperature", None),
+        humidity=getattr(dev, "humidity", None),
+        battery=getattr(dev, "battery", None),
+        online=getattr(dev, "online", True),
+        lan_ip=getattr(dev, "lan_ip", None),
+        lan_online=getattr(dev, "lan_online", False),
+        prefer_lan=getattr(dev, "prefer_lan", True),
+    )
 
 
 class LanDeviceConnection:
@@ -215,8 +233,9 @@ class EweLinkLanService:
                     except (TypeError, ValueError):
                         pass
                 dev.extra_data = json.dumps(params) if params else None
+                payload = _device_to_broadcast_payload(dev)
                 await session.commit()
-                await self._broadcast_device(dev)
+                await self._broadcast_device(payload)
 
     async def _on_lan_offline(self, device_id: str) -> None:
         async with async_session_maker() as session:
@@ -226,8 +245,9 @@ class EweLinkLanService:
             dev = result.scalars().first()
             if dev:
                 dev.lan_online = False
+                payload = _device_to_broadcast_payload(dev)
                 await session.commit()
-                await self._broadcast_device(dev)
+                await self._broadcast_device(payload)
 
     async def _set_lan_online(self, device_id: str, online: bool) -> None:
         async with async_session_maker() as session:
@@ -237,8 +257,9 @@ class EweLinkLanService:
             dev = result.scalars().first()
             if dev:
                 dev.lan_online = online
+                payload = _device_to_broadcast_payload(dev)
                 await session.commit()
-                await self._broadcast_device(dev)
+                await self._broadcast_device(payload)
 
     async def run_discovery(self) -> list[dict]:
         """Load eWeLink devices with lan_ip from DB and manage connections."""
@@ -291,8 +312,9 @@ class EweLinkLanService:
                 dev = result.scalars().first()
                 if dev:
                     dev.lan_online = False
+                    payload = _device_to_broadcast_payload(dev)
                     await session.commit()
-                    await self._broadcast_device(dev)
+                    await self._broadcast_device(payload)
 
         return [{"deviceid": did, "ip": ip} for did, (ip, _) in target.items()]
 
