@@ -129,21 +129,26 @@ async def list_nvr_cameras_paginated(
 async def go2rtc_proxy(request: Request, path: str):
     """
     Proxy requests to go2rtc instance.
-    No JWT auth required because HLS/video requests do not send Authorization headers.
-    Dashboard login remains protected separately.
+    Required for HLS streaming (.m3u8 + .ts segments).
+    Must stream bytes instead of buffering.
+    No JWT auth - HLS/video requests do not send headers.
     """
-    from fastapi.responses import Response, JSONResponse
+    from fastapi.responses import StreamingResponse, JSONResponse
 
     settings = get_settings()
     base = settings.go2rtc_url.rstrip("/")
     url = f"{base}/{path}" + (f"?{request.url.query}" if request.url.query else "")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
-        return Response(
-            content=r.content,
-            status_code=r.status_code,
-            headers=dict(r.headers),
+            response = await client.get(url, follow_redirects=True)
+        return StreamingResponse(
+            response.aiter_bytes(),
+            status_code=response.status_code,
+            headers={
+                "Content-Type": response.headers.get(
+                    "content-type", "application/octet-stream"
+                )
+            },
         )
     except Exception as e:
         return JSONResponse(
