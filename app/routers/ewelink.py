@@ -67,11 +67,11 @@ class PreferLanRequest(BaseModel):
 async def scan_lan_devices(
     user_id: int = Depends(get_current_user_id),
 ):
-    """Manually trigger LAN discovery for Sonoff devices."""
+    """Trigger LAN connection sync for devices with lan_ip."""
     found = await ewelink_lan_service.run_discovery()
     return {
         "count": len(found),
-        "devices": [{"deviceid": d.deviceid, "ip": d.ip, "model": d.model} for d in found],
+        "devices": [{"deviceid": d["deviceid"], "ip": d["ip"]} for d in found],
     }
 
 
