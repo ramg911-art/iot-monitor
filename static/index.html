@@ -352,7 +352,7 @@
       }
       grid.innerHTML = items.map((cam, idx) => {
         const elId = 'cam-video-' + cam.id;
-        const hlsUrl = cam.hls_url || (typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '');
+        const hlsUrl = typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '';
         const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
         return `
           <div class="camera-cell" data-hls="${hlsUrl}" data-name="${(cam.name || '').split('"').join('&quot;')}" data-id="${cam.id}">
@@ -366,7 +366,7 @@
         const elId = 'cam-video-' + cam.id;
         const videoEl = document.getElementById(elId);
         const phEl = document.getElementById(elId + '-ph');
-        const hlsUrl = cam.hls_url || (typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '');
+        const hlsUrl = typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '';
         if (videoEl && hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
           const hls = new Hls({ enableWorker: true });
           hlsInstances[elId] = hls;

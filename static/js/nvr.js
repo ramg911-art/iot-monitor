@@ -9,8 +9,8 @@ function getChannelFromExtra(extra) {
 }
 
 /**
- * Build HLS URL from camera object. Uses stream_name from API only.
- * Do not derive from name, channel, or NVR.
+ * Build HLS URL from camera object.
+ * Uses ONLY camera.stream_name from API. No reconstruction, no fallbacks.
  */
 function buildHlsUrl(camera) {
   if (!camera || !camera.stream_name) return '';
