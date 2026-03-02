@@ -126,31 +126,25 @@ async def list_nvr_cameras_paginated(
 
 
 @router.get("/go2rtc-proxy/{path:path}")
-async def go2rtc_proxy(
-    request: Request,
-    path: str,
-    user_id: int = Depends(get_current_user_id),
-):
-    """Proxy go2rtc streams to avoid CORS and unknown host (go2rtc is Docker-internal)."""
+async def go2rtc_proxy(request: Request, path: str):
+    """
+    Proxy requests to go2rtc instance.
+    No JWT auth required because HLS/video requests do not send Authorization headers.
+    Dashboard login remains protected separately.
+    """
     from fastapi.responses import Response, JSONResponse
 
     settings = get_settings()
-    url = f"{settings.go2rtc_url.rstrip('/')}/{path}"
-    if request.url.query:
-        url = f"{url}?{request.url.query}"
+    base = settings.go2rtc_url.rstrip("/")
+    url = f"{base}/{path}" + (f"?{request.url.query}" if request.url.query else "")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
-            resp = await client.get(url)
-            media_type = resp.headers.get("content-type", "application/vnd.apple.mpegurl")
-            return Response(
-                content=resp.content,
-                status_code=resp.status_code,
-                media_type=media_type,
-                headers={
-                    k: v for k, v in resp.headers.items()
-                    if k.lower() in ("content-type", "content-length", "cache-control")
-                },
-            )
+            r = await client.get(url)
+        return Response(
+            content=r.content,
+            status_code=r.status_code,
+            headers=dict(r.headers),
+        )
     except Exception as e:
         return JSONResponse(
             status_code=502,
