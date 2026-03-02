@@ -1,16 +1,15 @@
 """Background polling tasks - Tapo, cameras, eWeLink LAN."""
 import asyncio
 import logging
+from types import SimpleNamespace
 from typing import Optional
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
-from app.database import async_session_maker
+from app.database import async_session_maker, commit_with_retry, db_write_lock
 from app.models.device import (
     Device,
-    DEVICE_TYPE_CAMERA,
     DEVICE_TYPE_TAPO_H100,
     DEVICE_TYPE_TAPO_SWITCH,
     DEVICE_TYPE_TAPO_PLUG,
@@ -22,59 +21,92 @@ from app.websocket import ws_manager
 logger = logging.getLogger(__name__)
 
 
-async def _broadcast_device_update(device: Device) -> None:
-    """Broadcast standardized device_update (only on state change)."""
-    await ws_manager.broadcast_device_update(device)
+def _device_to_broadcast_payload(dev: Device) -> SimpleNamespace:
+    """Extract attributes for broadcast; avoids passing ORM object across session boundary."""
+    return SimpleNamespace(
+        id=dev.id,
+        device_type=dev.device_type,
+        state=getattr(dev, "state", None),
+        power=getattr(dev, "power", None),
+        temperature=getattr(dev, "temperature", None),
+        humidity=getattr(dev, "humidity", None),
+        battery=getattr(dev, "battery", None),
+        online=dev.online,
+        lan_ip=getattr(dev, "lan_ip", None),
+        lan_online=getattr(dev, "lan_online", False),
+        prefer_lan=getattr(dev, "prefer_lan", True),
+    )
 
 
-async def _poll_single_tapo_device(
-    session: AsyncSession,
-    device: Device,
-    device_id: int,
-    device_name: str,
-) -> None:
-    """Poll a single Tapo device with timeout and error isolation."""
+async def _broadcast_device_update(device_or_payload) -> None:
+    """Broadcast device update. Accepts Device or broadcast payload."""
+    await ws_manager.broadcast_device_update(device_or_payload)
+
+
+async def _mark_device_offline(device_id: int) -> None:
+    """Mark device offline using own session, db_write_lock, and retry."""
+    async with db_write_lock:
+        async with async_session_maker() as session:
+            result = await session.execute(select(Device).where(Device.id == device_id))
+            dev = result.scalars().first()
+            if dev:
+                dev.online = False
+                await commit_with_retry(session)
+                payload = _device_to_broadcast_payload(dev)
+                await _broadcast_device_update(payload)
+
+
+async def _poll_single_tapo_device(device_id: int, device_name: str, ip_address: str) -> None:
+    """
+    Poll a single Tapo device. Uses own session per poll.
+    No ORM reuse across sessions. No flush in tasks.
+    """
     try:
         await asyncio.wait_for(
-            poll_tapo_device(session, device, broadcast_cb=_broadcast_device_update),
+            _do_tapo_poll(device_id, device_name, ip_address),
             timeout=15,
         )
     except asyncio.TimeoutError:
         logger.warning("Tapo poll timeout for device %s (%s)", device_name, device_id)
+        await _mark_device_offline(device_id)
     except Exception as e:
         logger.warning("Tapo poll failed for %s: %s", device_name, e)
-        try:
-            await session.rollback()
-            device.online = False
-            await session.flush()
-            await _broadcast_device_update(device)
-        except Exception as inner:
-            logger.warning("Could not mark device %s offline: %s", device_name, inner)
-            try:
-                await session.rollback()
-            except Exception:
-                pass
+        await _mark_device_offline(device_id)
 
 
-async def _poll_tapo_with_broadcast(session: AsyncSession) -> None:
-    """Poll all Tapo devices (hubs, switches, plugs). Children are polled via hub."""
-    # Only poll devices with IP (hubs and standalone plugs/switches). Children have no IP.
-    stmt = select(Device).where(
-        Device.device_type.in_(
-            [DEVICE_TYPE_TAPO_H100, DEVICE_TYPE_TAPO_SWITCH, DEVICE_TYPE_TAPO_PLUG]
-        ),
-        Device.ip_address.isnot(None),
-    )
-    result = await session.execute(stmt)
-    devices = result.scalars().all()
+async def _do_tapo_poll(device_id: int, device_name: str, ip_address: str) -> None:
+    """Execute Tapo poll with own session and db_write_lock."""
 
-    # Load id/name into memory before polling (avoids lazy load if session is rolled back)
-    device_infos = [(d.id, d.name) for d in devices]
+    async def broadcast_cb(dev: Device) -> None:
+        payload = _device_to_broadcast_payload(dev)
+        await _broadcast_device_update(payload)
 
-    # Poll devices with small stagger to avoid overwhelming network
-    for dev, (dev_id, dev_name) in zip(devices, device_infos):
-        await _poll_single_tapo_device(session, dev, dev_id, dev_name)
-        await asyncio.sleep(0.5)  # Stagger to avoid DDoS
+    async with db_write_lock:
+        async with async_session_maker() as session:
+            result = await session.execute(select(Device).where(Device.id == device_id))
+            dev = result.scalars().first()
+            if not dev or not dev.ip_address:
+                return
+            await poll_tapo_device(session, dev, broadcast_cb=broadcast_cb)
+            await commit_with_retry(session)
+
+
+async def _poll_tapo_with_broadcast() -> None:
+    """Poll all Tapo devices. Each device gets its own session."""
+    async with async_session_maker() as session:
+        stmt = select(Device.id, Device.name, Device.ip_address).where(
+            Device.device_type.in_(
+                [DEVICE_TYPE_TAPO_H100, DEVICE_TYPE_TAPO_SWITCH, DEVICE_TYPE_TAPO_PLUG]
+            ),
+            Device.ip_address.isnot(None),
+        )
+        result = await session.execute(stmt)
+        rows = result.all()
+
+    for row in rows:
+        device_id, device_name, ip_address = row[0], row[1], row[2]
+        await _poll_single_tapo_device(device_id, device_name or "Device", ip_address)
+        await asyncio.sleep(0.5)
 
 
 async def tapo_poll_loop() -> None:
@@ -84,8 +116,7 @@ async def tapo_poll_loop() -> None:
     logger.info("Tapo poll loop started (interval=%ds)", interval)
     while True:
         try:
-            async with async_session_maker() as session:
-                await _poll_tapo_with_broadcast(session)
+            await _poll_tapo_with_broadcast()
         except asyncio.CancelledError:
             logger.info("Tapo poll loop cancelled")
             break
@@ -95,11 +126,7 @@ async def tapo_poll_loop() -> None:
 
 
 async def camera_poll_loop() -> None:
-    """
-    Poll cameras every 10s - just verify go2rtc streams.
-    Cameras are typically configured in go2rtc, we don't store camera state in DB
-    for each stream. This task can optionally sync stream list to DB if needed.
-    """
+    """Poll cameras - verify go2rtc streams. No DB writes."""
     settings = get_settings()
     interval = settings.camera_poll_interval
     while True:
@@ -109,7 +136,6 @@ async def camera_poll_loop() -> None:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(f"{settings.go2rtc_url}/api/streams")
                 if resp.status_code == 200:
-                    # Optionally update camera devices in DB
                     pass
         except asyncio.CancelledError:
             break
@@ -119,8 +145,9 @@ async def camera_poll_loop() -> None:
 
 
 async def start_background_tasks() -> list[asyncio.Task]:
-    """Start polling tasks. Returns list of tasks."""
-    async def _broadcast_device(device: Device) -> None:
+    """Start polling tasks."""
+
+    async def _broadcast_device(device) -> None:
         await ws_manager.broadcast_device_update(device)
 
     ewelink_lan_service.set_broadcast_callback(_broadcast_device)

@@ -1,4 +1,5 @@
 """Async database engine and session management."""
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
@@ -28,6 +29,19 @@ def get_engine():
 
 
 engine = get_engine()
+
+db_write_lock = asyncio.Lock()
+
+
+async def enable_sqlite_wal() -> None:
+    """Enable WAL mode for SQLite to reduce lock contention."""
+    if "sqlite" in str(engine.url):
+        async with engine.begin() as conn:
+            await conn.execute(text("PRAGMA journal_mode=WAL;"))
+            await conn.execute(text("PRAGMA synchronous=NORMAL;"))
+        logger.info("SQLite WAL mode enabled")
+
+
 async_session_maker = async_sessionmaker(
     engine, class_=AsyncSession, expire_on_commit=False, autoflush=False
 )
@@ -64,6 +78,7 @@ async def _run_schema_migrations(conn) -> None:
 
 async def init_db() -> None:
     """Create all tables and default admin user."""
+    await enable_sqlite_wal()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await _run_schema_migrations(conn)
@@ -105,3 +120,19 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
     """FastAPI dependency for database session."""
     async with get_session() as session:
         yield session
+
+
+async def commit_with_retry(session: AsyncSession, max_retries: int = 3) -> None:
+    """Commit with retry on database locked."""
+    for attempt in range(max_retries):
+        try:
+            await session.commit()
+            return
+        except Exception as e:
+            err_str = str(e).lower()
+            if hasattr(e, "orig") and e.orig:
+                err_str += " " + str(e.orig).lower()
+            if "database is locked" in err_str and attempt < max_retries - 1:
+                await asyncio.sleep(0.2 * (attempt + 1))
+            else:
+                raise

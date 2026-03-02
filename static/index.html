@@ -352,10 +352,10 @@
       }
       grid.innerHTML = items.map((cam, idx) => {
         const elId = 'cam-video-' + cam.id;
-        const hlsUrl = cam.hls_url || (go2rtcUrl ? `${go2rtcUrl}/api/stream.m3u8?src=${cam.stream_name || 'nvr_ch' + (cam.channel_number || idx + 1)}` : '');
+        const hlsUrl = cam.hls_url || (typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '');
         const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
         return `
-          <div class="camera-cell" data-hls="${hlsUrl}" data-name="${(cam.name || '').replace(/"/g, '&quot;')}" data-id="${cam.id}">
+          <div class="camera-cell" data-hls="${hlsUrl}" data-name="${(cam.name || '').split('"').join('&quot;')}" data-id="${cam.id}">
             <video id="${elId}" muted playsinline></video>
             <div class="cell-placeholder" id="${elId}-ph">Loading...</div>
             <div class="cell-label">${label}</div>
@@ -366,7 +366,7 @@
         const elId = 'cam-video-' + cam.id;
         const videoEl = document.getElementById(elId);
         const phEl = document.getElementById(elId + '-ph');
-        const hlsUrl = cam.hls_url || (data.go2rtc_url ? `${data.go2rtc_url}/api/stream.m3u8?src=${cam.stream_name || 'nvr_ch' + (cam.channel_number || idx + 1)}` : '');
+        const hlsUrl = cam.hls_url || (typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '');
         if (videoEl && hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
           const hls = new Hls({ enableWorker: true });
           hlsInstances[elId] = hls;

@@ -8,6 +8,15 @@ function getChannelFromExtra(extra) {
   } catch (_) { return null; }
 }
 
+/**
+ * Build HLS URL from camera object. Uses stream_name from API only.
+ * Do not derive from name, channel, or NVR.
+ */
+function buildHlsUrl(camera) {
+  if (!camera || !camera.stream_name) return '';
+  return `/api/cameras/go2rtc-proxy/api/stream.m3u8?src=${camera.stream_name}`;
+}
+
 function renderNvrList(devices, api, loadAll) {
   const nvrs = devices.filter(d => d.device_type === 'nvr');
   const cameras = devices.filter(d => d.device_type === 'nvr_camera');
@@ -19,7 +28,7 @@ function renderNvrList(devices, api, loadAll) {
   }
   listEl.innerHTML = nvrs.map(nvr => {
     const children = cameras.filter(c => c.parent_device_id === nvr.id);
-    const nvrNameEsc = (nvr.name || '').replace(/"/g, '&quot;');
+    const nvrNameEsc = (nvr.name || '').split('"').join('&quot;');
     return `
       <div class="nvr-item" data-nvr-id="${nvr.id}">
         <h4>
@@ -27,7 +36,7 @@ function renderNvrList(devices, api, loadAll) {
           <button class="delete-btn" data-id="${nvr.id}" data-name="${nvrNameEsc}" style="margin-left:8px;padding:2px 8px;font-size:0.7rem">Delete</button>
         </h4>
         ${children.length ? children.map(cam => {
-          const camNameEsc = (cam.name || '').replace(/"/g, '&quot;');
+          const camNameEsc = (cam.name || '').split('"').join('&quot;');
           return `
           <div class="nvr-camera-row" data-cam-id="${cam.id}">
             <span class="channel-info">
@@ -71,8 +80,9 @@ function renderNvrCameraTiles(streams) {
     const overlayHtml = isNvr
       ? `<div class="${overlayCls}"><span class="status ${s.online ? 'online' : 'offline'}"></span>${s.name}${s.parent_name ? ' · ' + s.parent_name : ''}${!s.online ? ' (offline)' : ''}</div>`
       : '';
+    const hlsUrl = buildHlsUrl(s);
     return `
-      <div class="camera-frame" data-stream-id="${s.id}" data-device-id="${s.device_id || ''}" data-online="${s.online !== false}">
+      <div class="camera-frame" data-stream-id="${s.id}" data-device-id="${s.device_id || ''}" data-online="${s.online !== false}" data-hls-url="${hlsUrl}">
         ${overlayHtml}
         <iframe src="${s.url}" title="${s.name}" ${!s.online && isNvr ? 'style="opacity:0.3"' : ''}></iframe>
       </div>
