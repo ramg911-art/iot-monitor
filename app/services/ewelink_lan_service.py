@@ -36,6 +36,12 @@ def get_broadcast_address() -> str:
     return f"{parts[0]}.{parts[1]}.{parts[2]}.255"
 
 
+async def _get_broadcast_async() -> str:
+    """Run get_broadcast_address in executor to avoid blocking event loop."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, get_broadcast_address)
+
+
 @dataclass
 class DiscoveredDevice:
     deviceid: str
@@ -102,7 +108,7 @@ async def _udp_discover() -> list[DiscoveredDevice]:
     probe = json.dumps({"action": "probe", "ts": str(int(time.time()))}).encode()
 
     try:
-        broadcast = get_broadcast_address()
+        broadcast = await _get_broadcast_async()
         transport, _ = await asyncio.get_event_loop().create_datagram_endpoint(
             lambda: _UDPDiscoveryProtocol(devices, seen),
             local_addr=("0.0.0.0", 0),
