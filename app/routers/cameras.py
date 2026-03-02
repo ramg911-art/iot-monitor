@@ -150,18 +150,22 @@ async def list_nvr_cameras_paginated(
         }
 
 
-@router.get("/go2rtc-proxy/{path:path}")
+@router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST"])
 async def go2rtc_proxy(path: str, request: Request):
     """
-    Stable streaming proxy for go2rtc HLS.
-    Prevents partial transfer errors.
+    Proxy for go2rtc (HLS, WebRTC). GET streams, POST forwards body (WebRTC SDP).
     """
+    from fastapi.responses import Response
 
+    settings = get_settings()
+    base = settings.go2rtc_url.rstrip("/")
     query_string = request.url.query
-    if query_string:
-        url = f"http://127.0.0.1:1984/{path}?{query_string}"
-    else:
-        url = f"http://127.0.0.1:1984/{path}"
+    url = f"{base}/{path}" + (f"?{query_string}" if query_string else "")
+
+    if request.method == "POST":
+        body = await request.body()
+        resp = await go2rtc_client.post(url, content=body, headers={"Content-Type": request.headers.get("content-type", "application/sdp")})
+        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type", "text/plain"))
 
     async def stream_generator():
         async with go2rtc_client.stream("GET", url) as upstream:

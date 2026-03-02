@@ -5,7 +5,6 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IoT Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
   <script src="/static/js/nvr.js"></script>
   <style>
     :root {
@@ -330,7 +329,29 @@
 
     let cameraGridPage = 1;
     const cameraGridPerPage = 16;
-    const hlsInstances = {};
+    const webrtcConnections = {};
+
+    async function startWebRTC(videoElement, streamName) {
+      if (!videoElement || !streamName) return;
+      const pc = new RTCPeerConnection();
+      webrtcConnections['modal'] = pc;
+      pc.ontrack = (event) => {
+        videoElement.srcObject = event.streams[0];
+      };
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+      const response = await fetch(
+        `/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/sdp' },
+          body: offer.sdp
+        }
+      );
+      if (!response.ok) throw new Error('WebRTC handshake failed');
+      const answerSDP = await response.text();
+      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerSDP }));
+    }
 
     async function loadNvrCamerasGrid(page) {
       const data = await api('GET', `/cameras/nvr-cameras?page=${page}&per_page=${cameraGridPerPage}`);
@@ -342,50 +363,62 @@
     function renderCameraGrid4x4(data) {
       const grid = document.getElementById('camera-grid-4x4');
       if (!grid) return;
-      Object.values(hlsInstances).forEach(h => { try { h.destroy(); } catch (_) {} });
-      Object.keys(hlsInstances).length = 0;
+      Object.entries(webrtcConnections).forEach(([k, pc]) => {
+        if (k !== 'modal') { try { pc.close(); } catch (_) {} }
+      });
+      Object.keys(webrtcConnections).forEach(k => { if (k !== 'modal') delete webrtcConnections[k]; });
       const items = data.items || [];
-      const go2rtcUrl = data.go2rtc_url || '';
       if (items.length === 0) {
         grid.innerHTML = '<p style="grid-column:1/-1;color:var(--muted);padding:24px">No NVR cameras. Add an NVR in the Dahua NVR section below.</p>';
         return;
       }
-      grid.innerHTML = items.map((cam, idx) => {
+      grid.innerHTML = items.map((cam) => {
         const elId = 'cam-video-' + cam.id;
-        const hlsUrl = typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '';
+        const streamName = cam.stream_name || '';
         const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
         return `
-          <div class="camera-cell" data-hls="${hlsUrl}" data-name="${(cam.name || '').split('"').join('&quot;')}" data-id="${cam.id}">
-            <video id="${elId}" muted playsinline></video>
+          <div class="camera-cell" data-stream-name="${(streamName || '').split('"').join('&quot;')}" data-name="${(cam.name || '').split('"').join('&quot;')}" data-id="${cam.id}">
+            <video id="${elId}" autoplay muted playsinline></video>
             <div class="cell-placeholder" id="${elId}-ph">Loading...</div>
             <div class="cell-label">${label}</div>
           </div>
         `;
       }).join('');
-      items.forEach((cam, idx) => {
+      items.forEach((cam) => {
         const elId = 'cam-video-' + cam.id;
         const videoEl = document.getElementById(elId);
         const phEl = document.getElementById(elId + '-ph');
-        const hlsUrl = typeof buildHlsUrl === 'function' ? buildHlsUrl(cam) : '';
-        if (videoEl && hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
-          const hls = new Hls({ enableWorker: true });
-          hlsInstances[elId] = hls;
-          hls.loadSource(hlsUrl);
-          hls.attachMedia(videoEl);
-          hls.on(Hls.Events.MANIFEST_PARSED, () => { if (phEl) phEl.style.display = 'none'; });
-          hls.on(Hls.Events.ERROR, () => { if (phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; } });
-        } else if (videoEl && hlsUrl && videoEl.canPlayType('application/vnd.apple.mpegurl')) {
-          videoEl.src = hlsUrl;
-          videoEl.addEventListener('loadedmetadata', () => { if (phEl) phEl.style.display = 'none'; });
+        const streamName = cam.stream_name || '';
+        if (videoEl && streamName) {
+          const pc = new RTCPeerConnection();
+          webrtcConnections[elId] = pc;
+          pc.ontrack = (event) => {
+            videoEl.srcObject = event.streams[0];
+            if (phEl) phEl.style.display = 'none';
+          };
+          pc.onconnectionstatechange = () => {
+            if (pc.connectionState === 'failed' && phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; }
+          };
+          pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() =>
+            fetch(`/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/sdp' },
+              body: pc.localDescription.sdp
+            })
+          ).then(r => r.ok ? r.text() : Promise.reject()).then(answerSDP =>
+            pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerSDP }))
+          ).catch(() => {
+            if (phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; }
+          });
         } else if (phEl) {
           phEl.textContent = 'No stream';
         }
       });
       grid.querySelectorAll('.camera-cell').forEach(cell => {
         cell.onclick = () => {
-          const hls = cell.dataset.hls;
+          const streamName = cell.dataset.streamName || '';
           const name = cell.dataset.name || 'Camera';
-          openCameraModal(hls, name);
+          openCameraModal(streamName, name);
         };
       });
     }
@@ -404,30 +437,30 @@
       `;
     }
 
-    function openCameraModal(hlsUrl, name) {
+    async function openCameraModal(streamName, name) {
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
       const title = document.getElementById('camera-modal-title');
       if (!modal || !video) return;
       title.textContent = name || 'Camera';
-      if (window._cameraModalHls) { try { window._cameraModalHls.destroy(); } catch (_) {} }
+      if (webrtcConnections['modal']) { try { webrtcConnections['modal'].close(); } catch (_) {} delete webrtcConnections['modal']; }
+      video.srcObject = null;
       video.src = '';
-      if (hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
-        const hls = new Hls();
-        window._cameraModalHls = hls;
-        hls.loadSource(hlsUrl);
-        hls.attachMedia(video);
-      } else if (hlsUrl && video.canPlayType('application/vnd.apple.mpegurl')) {
-        video.src = hlsUrl;
-      }
       modal.classList.add('open');
+      if (streamName) {
+        try {
+          await startWebRTC(video, streamName);
+        } catch (e) {
+          console.warn('WebRTC failed:', e);
+        }
+      }
     }
 
     function closeCameraModal() {
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
-      if (video) video.pause();
-      if (window._cameraModalHls) { try { window._cameraModalHls.destroy(); } catch (_) {} window._cameraModalHls = null; }
+      if (video) { video.pause(); video.srcObject = null; video.src = ''; }
+      if (webrtcConnections['modal']) { try { webrtcConnections['modal'].close(); } catch (_) {} delete webrtcConnections['modal']; }
       if (modal) modal.classList.remove('open');
     }
 

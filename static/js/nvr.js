@@ -8,15 +8,6 @@ function getChannelFromExtra(extra) {
   } catch (_) { return null; }
 }
 
-/**
- * Build HLS URL from camera object.
- * Uses ONLY camera.stream_name from API. No reconstruction, no fallbacks.
- */
-function buildHlsUrl(camera) {
-  if (!camera || !camera.stream_name) return '';
-  return `/api/cameras/go2rtc-proxy/api/stream.m3u8?src=${camera.stream_name}`;
-}
-
 function renderNvrList(devices, api, loadAll) {
   const nvrs = devices.filter(d => d.device_type === 'nvr');
   const cameras = devices.filter(d => d.device_type === 'nvr_camera');
@@ -80,9 +71,9 @@ function renderNvrCameraTiles(streams) {
     const overlayHtml = isNvr
       ? `<div class="${overlayCls}"><span class="status ${s.online ? 'online' : 'offline'}"></span>${s.name}${s.parent_name ? ' · ' + s.parent_name : ''}${!s.online ? ' (offline)' : ''}</div>`
       : '';
-    const hlsUrl = buildHlsUrl(s);
+    const streamName = s.stream_name || s.id || '';
     return `
-      <div class="camera-frame" data-stream-id="${s.id}" data-device-id="${s.device_id || ''}" data-online="${s.online !== false}" data-hls-url="${hlsUrl}">
+      <div class="camera-frame" data-stream-id="${s.id}" data-device-id="${s.device_id || ''}" data-stream-name="${(streamName || '').split('"').join('&quot;')}" data-online="${s.online !== false}">
         ${overlayHtml}
         <iframe src="${s.url}" title="${s.name}" ${!s.online && isNvr ? 'style="opacity:0.3"' : ''}></iframe>
       </div>
