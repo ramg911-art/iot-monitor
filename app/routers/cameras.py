@@ -154,7 +154,10 @@ async def list_nvr_cameras_paginated(
 async def go2rtc_proxy(path: str, request: Request):
     """
     Proxy for go2rtc (HLS, WebRTC). GET streams, POST forwards body (WebRTC SDP).
+    Falls back to 127.0.0.1:1984 when go2rtc hostname fails to resolve (app on host).
     """
+    import httpx
+
     from fastapi.responses import Response
 
     settings = get_settings()
@@ -162,15 +165,37 @@ async def go2rtc_proxy(path: str, request: Request):
     query_string = request.url.query
     url = f"{base}/{path}" + (f"?{query_string}" if query_string else "")
 
+    fallback_base = "http://127.0.0.1:1984"
+    fallback_url = f"{fallback_base}/{path}" + (f"?{query_string}" if query_string else "")
+
     if request.method == "POST":
         body = await request.body()
-        resp = await go2rtc_client.post(url, content=body, headers={"Content-Type": request.headers.get("content-type", "application/sdp")})
-        return Response(content=resp.content, status_code=resp.status_code, media_type=resp.headers.get("content-type", "text/plain"))
+        headers = {"Content-Type": request.headers.get("content-type", "application/sdp")}
+        try:
+            resp = await go2rtc_client.post(url, content=body, headers=headers)
+        except httpx.ConnectError:
+            if url != fallback_url and "go2rtc" in base:
+                resp = await go2rtc_client.post(fallback_url, content=body, headers=headers)
+            else:
+                raise
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            media_type=resp.headers.get("content-type", "text/plain"),
+        )
 
     async def stream_generator():
-        async with go2rtc_client.stream("GET", url) as upstream:
-            async for chunk in upstream.aiter_bytes():
-                yield chunk
+        try:
+            async with go2rtc_client.stream("GET", url) as upstream:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+        except httpx.ConnectError:
+            if url != fallback_url and "go2rtc" in base:
+                async with go2rtc_client.stream("GET", fallback_url) as upstream:
+                    async for chunk in upstream.aiter_bytes():
+                        yield chunk
+            else:
+                raise
 
     return StreamingResponse(
         stream_generator(),
