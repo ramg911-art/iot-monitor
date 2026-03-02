@@ -1,6 +1,7 @@
 """Dahua NVR management - add NVR, list cameras, enable/disable channels."""
 import json
 import logging
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -17,6 +18,21 @@ from app.websocket import ws_manager
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/nvr", tags=["nvr"])
+
+
+def _get_nvr_stream_name(cam) -> str:
+    """Get go2rtc stream name (nvr_ch1, nvr_ch2, ...). Never use parent ID."""
+    if cam.stream_name:
+        return cam.stream_name
+    if cam.channel_number is not None:
+        return f"nvr_ch{cam.channel_number}"
+    name = cam.name or ""
+    match = re.search(r"(?:channel|ch)\s*(\d+)", name, re.IGNORECASE)
+    if match:
+        return f"nvr_ch{int(match.group(1))}"
+    if cam.go2rtc_stream_id:
+        return cam.go2rtc_stream_id
+    return "nvr_ch1"
 
 
 class AddNvrRequest(BaseModel):
@@ -115,7 +131,7 @@ async def get_nvr_cameras(
                 "id": c.id,
                 "name": c.name,
                 "channel_number": c.channel_number,
-                "stream_name": c.stream_name or c.go2rtc_stream_id,
+                "stream_name": _get_nvr_stream_name(c),
                 "state": c.state,
                 "online": c.online,
             }

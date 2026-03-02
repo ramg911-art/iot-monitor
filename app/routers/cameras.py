@@ -1,4 +1,5 @@
 """Camera management - go2rtc stream list and playback URLs."""
+import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -25,6 +26,22 @@ def _proxy_url(path: str, query: str = "") -> str:
     """Build proxy URL for frontend (same-origin, avoids CORS/unknown host)."""
     q = f"?{query}" if query else ""
     return f"/api/cameras/go2rtc-proxy/{path}{q}"
+
+
+def _get_nvr_stream_name(cam) -> str:
+    """Get go2rtc stream name (nvr_ch1, nvr_ch2, ...). Never use parent ID."""
+    if cam.stream_name:
+        return cam.stream_name
+    if cam.channel_number is not None:
+        return f"nvr_ch{cam.channel_number}"
+    # Derive from camera name, e.g. "Channel 3" -> 3
+    name = cam.name or ""
+    match = re.search(r"(?:channel|ch)\s*(\d+)", name, re.IGNORECASE)
+    if match:
+        return f"nvr_ch{int(match.group(1))}"
+    if cam.go2rtc_stream_id:
+        return cam.go2rtc_stream_id
+    return "nvr_ch1"
 
 
 @router.get("/streams")
@@ -61,11 +78,7 @@ async def list_streams(
         )
         nvr_cams = result.scalars().all()
         for cam in nvr_cams:
-            stream_id = (
-                f"nvr_ch{cam.channel_number}"
-                if cam.channel_number is not None
-                else (cam.go2rtc_stream_id or cam.stream_name or f"nvr_ch{cam.id}")
-            )
+            stream_id = _get_nvr_stream_name(cam)
             hls_url = f"{settings.go2rtc_url}/api/hls/{stream_id}/index.m3u8"
             html_url = f"{settings.go2rtc_url}/api/stream.html?src={stream_id}"
             parent_name = None
@@ -75,6 +88,7 @@ async def list_streams(
             streams.append({
                 "id": stream_id,
                 "name": cam.name,
+                "stream_name": stream_id,
                 "url": html_url,
                 "hls_url": hls_url,
                 "type": "nvr_camera",
@@ -110,12 +124,7 @@ async def list_nvr_cameras_paginated(
         cams = result.scalars().all()
         items = []
         for cam in cams:
-            # go2rtc expects nvr_ch1, nvr_ch2, etc. Prefer channel_number over DB stream_name.
-            go2rtc_src = (
-                f"nvr_ch{cam.channel_number}"
-                if cam.channel_number is not None
-                else (cam.stream_name or cam.go2rtc_stream_id or f"nvr_ch{cam.id}")
-            )
+            go2rtc_src = _get_nvr_stream_name(cam)
             hls_url = _proxy_url("api/stream.m3u8", f"src={go2rtc_src}")
             parent_name = None
             if cam.parent_device_id:
