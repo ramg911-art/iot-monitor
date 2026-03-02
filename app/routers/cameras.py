@@ -1,8 +1,8 @@
 """Camera management - go2rtc stream list and playback URLs."""
-import logging
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
 # Shared client for go2rtc proxy (HLS parallel segment requests)
 go2rtc_client = httpx.AsyncClient(
-    timeout=httpx.Timeout(20.0),
+    timeout=httpx.Timeout(30.0),
     limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
 )
 
@@ -135,40 +135,22 @@ async def list_nvr_cameras_paginated(
 @router.get("/go2rtc-proxy/{path:path}")
 async def go2rtc_proxy(path: str, request: Request):
     """
-    Production-safe streaming proxy for go2rtc HLS.
-    Uses shared client; connection happens in route body so ConnectError returns 502.
+    Stable streaming proxy for go2rtc HLS.
+    Prevents partial transfer errors.
     """
-    from fastapi.responses import StreamingResponse, Response
 
-    settings = get_settings()
-    base = settings.go2rtc_url.rstrip("/")
     query_string = request.url.query
     if query_string:
-        url = f"{base}/{path}?{query_string}"
+        url = f"http://127.0.0.1:1984/{path}?{query_string}"
     else:
-        url = f"{base}/{path}"
+        url = f"http://127.0.0.1:1984/{path}"
 
-    try:
-        response = await go2rtc_client.get(url, follow_redirects=True)
-        content = response.content
-        status_code = response.status_code
-        content_type = response.headers.get(
-            "content-type", "application/octet-stream"
-        )
+    async def stream_generator():
+        async with go2rtc_client.stream("GET", url) as upstream:
+            async for chunk in upstream.aiter_bytes():
+                yield chunk
 
-        def iter_chunks():
-            chunk_size = 64 * 1024
-            for i in range(0, len(content), chunk_size):
-                yield content[i : i + chunk_size]
-
-        return StreamingResponse(
-            iter_chunks(),
-            status_code=status_code,
-            headers={"Content-Type": content_type},
-        )
-    except Exception as e:
-        logging.warning("go2rtc proxy failed %s: %s", url, e)
-        return Response(
-            content=f"Proxy error: {str(e)}",
-            status_code=502,
-        )
+    return StreamingResponse(
+        stream_generator(),
+        media_type="application/octet-stream",
+    )
