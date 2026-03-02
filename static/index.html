@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>IoT Monitor</title>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.7"></script>
   <script src="/static/js/nvr.js"></script>
   <style>
     :root {
@@ -157,6 +158,18 @@
     .lan-badge.lan-cloud { background: #e6a23c; color: var(--bg); }
     .prefer-lan-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--muted); cursor: pointer; margin-left: 8px; }
     .prefer-lan-toggle input { cursor: pointer; }
+    .camera-grid-4x4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .camera-grid-4x4 .camera-cell { aspect-ratio: 16/9; background: var(--surface); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); cursor: pointer; position: relative; }
+    .camera-grid-4x4 .camera-cell video { width: 100%; height: 100%; object-fit: cover; }
+    .camera-grid-4x4 .camera-cell .cell-label { position: absolute; bottom: 0; left: 0; right: 0; padding: 6px 8px; background: linear-gradient(transparent, rgba(0,0,0,0.8)); color: #fff; font-size: 0.75rem; }
+    .camera-grid-4x4 .camera-cell .cell-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.85rem; }
+    .pagination { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
+    .pagination button { padding: 6px 12px; background: var(--border); border: none; border-radius: var(--radius); color: var(--text); cursor: pointer; font-family: inherit; }
+    .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
+    .pagination button.active { background: var(--accent); color: var(--bg); }
+    .pagination span { color: var(--muted); font-size: 0.85rem; }
+    .camera-modal .modal-content { max-width: 900px; }
+    .camera-modal video { width: 100%; border-radius: var(--radius); background: #000; }
   </style>
 </head>
 <body>
@@ -180,7 +193,8 @@
 
       <div class="section">
         <h2>Cameras</h2>
-        <div id="camera-grid" class="camera-grid"></div>
+        <div id="camera-grid-4x4" class="camera-grid-4x4"></div>
+        <div id="camera-pagination" class="pagination"></div>
       </div>
 
       <div class="section">
@@ -220,15 +234,27 @@
 
   <div id="nvr-add-modal" class="modal">
     <div class="modal-content">
-      <h3>Add Dahua NVR</h3>
+      <h3>Add NVR</h3>
+      <input id="nvr-name" type="text" placeholder="Name (e.g. Living Room NVR)">
       <input id="nvr-ip" type="text" placeholder="IP address (e.g. 192.168.1.50)">
       <input id="nvr-username" type="text" placeholder="Username">
       <input id="nvr-password" type="password" placeholder="Password">
+      <input id="nvr-channels" type="number" placeholder="Total channels (1-32)" value="4" min="1" max="32">
       <div class="actions">
         <button class="primary" id="nvr-add-save">Add</button>
         <button class="secondary" onclick="document.getElementById('nvr-add-modal').classList.remove('open')">Cancel</button>
       </div>
       <p id="nvr-add-err" style="color:var(--danger);font-size:0.85rem;margin-top:8px;display:none"></p>
+    </div>
+  </div>
+
+  <div id="camera-modal" class="modal camera-modal">
+    <div class="modal-content">
+      <h3 id="camera-modal-title">Camera</h3>
+      <video id="camera-modal-video" controls muted autoplay playsinline></video>
+      <div class="actions" style="margin-top:12px">
+        <button class="secondary" onclick="closeCameraModal()">Close</button>
+      </div>
     </div>
   </div>
 
@@ -300,6 +326,109 @@
     async function loadCameras() {
       const data = await api('GET', '/cameras/streams');
       return (data && data.streams) || [];
+    }
+
+    let cameraGridPage = 1;
+    const cameraGridPerPage = 16;
+    const hlsInstances = {};
+
+    async function loadNvrCamerasGrid(page) {
+      const data = await api('GET', `/cameras/nvr-cameras?page=${page}&per_page=${cameraGridPerPage}`);
+      if (!data) return;
+      renderCameraGrid4x4(data);
+      renderCameraPagination(data);
+    }
+
+    function renderCameraGrid4x4(data) {
+      const grid = document.getElementById('camera-grid-4x4');
+      if (!grid) return;
+      Object.values(hlsInstances).forEach(h => { try { h.destroy(); } catch (_) {} });
+      Object.keys(hlsInstances).length = 0;
+      const items = data.items || [];
+      const go2rtcUrl = data.go2rtc_url || '';
+      if (items.length === 0) {
+        grid.innerHTML = '<p style="grid-column:1/-1;color:var(--muted);padding:24px">No NVR cameras. Add an NVR in the Dahua NVR section below.</p>';
+        return;
+      }
+      grid.innerHTML = items.map((cam, idx) => {
+        const elId = 'cam-video-' + cam.id;
+        const hlsUrl = cam.hls_url || (go2rtcUrl ? `${go2rtcUrl}/api/stream.m3u8?src=${cam.stream_name || 'nvr_ch' + (cam.channel_number || idx + 1)}` : '');
+        const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
+        return `
+          <div class="camera-cell" data-hls="${hlsUrl}" data-name="${(cam.name || '').replace(/"/g, '&quot;')}" data-id="${cam.id}">
+            <video id="${elId}" muted playsinline></video>
+            <div class="cell-placeholder" id="${elId}-ph">Loading...</div>
+            <div class="cell-label">${label}</div>
+          </div>
+        `;
+      }).join('');
+      items.forEach((cam, idx) => {
+        const elId = 'cam-video-' + cam.id;
+        const videoEl = document.getElementById(elId);
+        const phEl = document.getElementById(elId + '-ph');
+        const hlsUrl = cam.hls_url || (data.go2rtc_url ? `${data.go2rtc_url}/api/stream.m3u8?src=${cam.stream_name || 'nvr_ch' + (cam.channel_number || idx + 1)}` : '');
+        if (videoEl && hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
+          const hls = new Hls({ enableWorker: true });
+          hlsInstances[elId] = hls;
+          hls.loadSource(hlsUrl);
+          hls.attachMedia(videoEl);
+          hls.on(Hls.Events.MANIFEST_PARSED, () => { if (phEl) phEl.style.display = 'none'; });
+          hls.on(Hls.Events.ERROR, () => { if (phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; } });
+        } else if (videoEl && hlsUrl && videoEl.canPlayType('application/vnd.apple.mpegurl')) {
+          videoEl.src = hlsUrl;
+          videoEl.addEventListener('loadedmetadata', () => { if (phEl) phEl.style.display = 'none'; });
+        } else if (phEl) {
+          phEl.textContent = 'No stream';
+        }
+      });
+      grid.querySelectorAll('.camera-cell').forEach(cell => {
+        cell.onclick = () => {
+          const hls = cell.dataset.hls;
+          const name = cell.dataset.name || 'Camera';
+          openCameraModal(hls, name);
+        };
+      });
+    }
+
+    function renderCameraPagination(data) {
+      const pag = document.getElementById('camera-pagination');
+      if (!pag || !data) return;
+      const pages = data.pages || 1;
+      const page = data.page || 1;
+      const total = data.total || 0;
+      if (total === 0) { pag.innerHTML = ''; return; }
+      pag.innerHTML = `
+        <button ${page <= 1 ? 'disabled' : ''} onclick="cameraGridPage=Math.max(1,cameraGridPage-1);loadNvrCamerasGrid(cameraGridPage)">Prev</button>
+        <span>Page ${page} of ${pages} (${total} cameras)</span>
+        <button ${page >= pages ? 'disabled' : ''} onclick="cameraGridPage=Math.min(${pages},cameraGridPage+1);loadNvrCamerasGrid(cameraGridPage)">Next</button>
+      `;
+    }
+
+    function openCameraModal(hlsUrl, name) {
+      const modal = document.getElementById('camera-modal');
+      const video = document.getElementById('camera-modal-video');
+      const title = document.getElementById('camera-modal-title');
+      if (!modal || !video) return;
+      title.textContent = name || 'Camera';
+      if (window._cameraModalHls) { try { window._cameraModalHls.destroy(); } catch (_) {} }
+      video.src = '';
+      if (hlsUrl && typeof Hls !== 'undefined' && Hls.isSupported()) {
+        const hls = new Hls();
+        window._cameraModalHls = hls;
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+      } else if (hlsUrl && video.canPlayType('application/vnd.apple.mpegurl')) {
+        video.src = hlsUrl;
+      }
+      modal.classList.add('open');
+    }
+
+    function closeCameraModal() {
+      const modal = document.getElementById('camera-modal');
+      const video = document.getElementById('camera-modal-video');
+      if (video) video.pause();
+      if (window._cameraModalHls) { try { window._cameraModalHls.destroy(); } catch (_) {} window._cameraModalHls = null; }
+      if (modal) modal.classList.remove('open');
     }
 
     function renderDevices(devices, gridId, types, showChart) {
@@ -420,10 +549,7 @@
       renderDevices(devList, 'tapo-grid', ['tapo_h100', 'tapo_switch', 'tapo_plug', 'door', 'temp_sensor'], true);
       renderDevices(devList, 'ewelink-grid', ['ewelink'], true);
       if (typeof renderNvrList === 'function') renderNvrList(devList, api, loadAll);
-      const camGrid = document.getElementById('camera-grid');
-      camGrid.innerHTML = typeof renderNvrCameraTiles === 'function' ? renderNvrCameraTiles(streamList) : streamList.map(s => `
-        <div class="camera-frame"><iframe src="${s.url}" title="${s.name}"></iframe></div>
-      `).join('');
+      loadNvrCamerasGrid(cameraGridPage);
     }
 
     document.getElementById('tapo-add').onclick = () => document.getElementById('tapo-add-modal').classList.add('open');
@@ -474,9 +600,11 @@
 
     document.getElementById('nvr-add').onclick = () => document.getElementById('nvr-add-modal').classList.add('open');
     document.getElementById('nvr-add-save').onclick = async () => {
+      const name = document.getElementById('nvr-name').value.trim();
       const ip = document.getElementById('nvr-ip').value.trim();
       const username = document.getElementById('nvr-username').value.trim();
       const password = document.getElementById('nvr-password').value;
+      const channels = parseInt(document.getElementById('nvr-channels').value, 10) || 4;
       const err = document.getElementById('nvr-add-err');
       const btn = document.getElementById('nvr-add-save');
       if (!ip || !username || !password) {
@@ -487,14 +615,16 @@
       btn.disabled = true;
       btn.innerHTML = '<span class="loading-spinner" style="vertical-align:middle"></span> Adding...';
       err.style.display = 'none';
-      const r = await api('POST', '/nvr/add', { ip_address: ip, username, password });
+      const r = await api('POST', '/nvr/add', { name: name || undefined, ip_address: ip, username, password, total_channels: channels });
       btn.disabled = false;
       btn.textContent = 'Add';
       if (r && r.id) {
         document.getElementById('nvr-add-modal').classList.remove('open');
+        document.getElementById('nvr-name').value = '';
         document.getElementById('nvr-ip').value = '';
         document.getElementById('nvr-username').value = '';
         document.getElementById('nvr-password').value = '';
+        document.getElementById('nvr-channels').value = '4';
         err.style.display = 'none';
         loadAll();
       } else {

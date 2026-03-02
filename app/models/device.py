@@ -48,6 +48,13 @@ class Device(Base):
     # eWeLink LAN auth - encrypted, from cloud sync
     ewelink_apikey_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
+    # NVR / camera
+    channel_number: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    stream_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    total_channels: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)  # NVR parent only
+    nvr_username: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    nvr_password_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
     # LAN mode (eWeLink/Sonoff local control)
     lan_ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     lan_online: Mapped[bool] = mapped_column(default=False)

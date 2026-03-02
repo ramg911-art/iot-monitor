@@ -1,8 +1,8 @@
 """Camera management - go2rtc stream list and playback URLs."""
 from typing import Optional
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
@@ -67,3 +67,53 @@ async def list_streams(
             })
 
     return {"streams": streams, "go2rtc_url": settings.go2rtc_url}
+
+
+@router.get("/nvr-cameras")
+async def list_nvr_cameras_paginated(
+    page: int = Query(1, ge=1),
+    per_page: int = Query(16, ge=1, le=64),
+    user_id: int = Depends(get_current_user_id),
+):
+    """Paginated list of NVR cameras for 4x4 grid (16 per page)."""
+    async with async_session_maker() as session:
+        settings = get_settings()
+        count_result = await session.execute(
+            select(func.count(Device.id)).where(Device.device_type == DEVICE_TYPE_NVR_CAMERA)
+        )
+        total = count_result.scalar() or 0
+        offset = (page - 1) * per_page
+        result = await session.execute(
+            select(Device)
+            .where(Device.device_type == DEVICE_TYPE_NVR_CAMERA)
+            .order_by(Device.parent_device_id, Device.channel_number)
+            .offset(offset)
+            .limit(per_page)
+        )
+        cams = result.scalars().all()
+        items = []
+        for cam in cams:
+            stream_name = cam.stream_name or cam.go2rtc_stream_id or f"nvr_ch{cam.channel_number or cam.id}"
+            hls_url = f"{settings.go2rtc_url}/api/stream.m3u8?src={stream_name}"
+            parent_name = None
+            if cam.parent_device_id:
+                p = await session.get(Device, cam.parent_device_id)
+                parent_name = p.name if p else None
+            items.append({
+                "id": cam.id,
+                "name": cam.name,
+                "channel_number": cam.channel_number,
+                "stream_name": stream_name,
+                "hls_url": hls_url,
+                "parent_name": parent_name,
+                "online": cam.online,
+                "state": cam.state,
+            })
+        return {
+            "items": items,
+            "total": total,
+            "page": page,
+            "per_page": per_page,
+            "pages": (total + per_page - 1) // per_page if total > 0 else 1,
+            "go2rtc_url": settings.go2rtc_url,
+        }

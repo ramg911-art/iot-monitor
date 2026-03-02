@@ -49,6 +49,11 @@ async def _run_schema_migrations(conn) -> None:
             ("lan_online", "ALTER TABLE devices ADD COLUMN lan_online BOOLEAN DEFAULT 0"),
             ("prefer_lan", "ALTER TABLE devices ADD COLUMN prefer_lan BOOLEAN DEFAULT 1"),
             ("ewelink_apikey_encrypted", "ALTER TABLE devices ADD COLUMN ewelink_apikey_encrypted TEXT"),
+            ("channel_number", "ALTER TABLE devices ADD COLUMN channel_number INTEGER"),
+            ("stream_name", "ALTER TABLE devices ADD COLUMN stream_name VARCHAR(64)"),
+            ("total_channels", "ALTER TABLE devices ADD COLUMN total_channels INTEGER"),
+            ("nvr_username", "ALTER TABLE devices ADD COLUMN nvr_username VARCHAR(128)"),
+            ("nvr_password_encrypted", "ALTER TABLE devices ADD COLUMN nvr_password_encrypted TEXT"),
         ]:
             if col not in columns:
                 connection.execute(text(sql))
