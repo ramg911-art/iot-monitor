@@ -14,6 +14,12 @@ from app.models.device import Device, DEVICE_TYPE_NVR_CAMERA
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
 
+# Shared client for go2rtc proxy (HLS parallel segment requests)
+go2rtc_client = httpx.AsyncClient(
+    timeout=httpx.Timeout(20.0),
+    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100),
+)
+
 
 def _proxy_url(path: str, query: str = "") -> str:
     """Build proxy URL for frontend (same-origin, avoids CORS/unknown host)."""
@@ -127,40 +133,34 @@ async def list_nvr_cameras_paginated(
 
 
 @router.get("/go2rtc-proxy/{path:path}")
-async def go2rtc_proxy(request: Request, path: str):
+async def go2rtc_proxy(path: str, request: Request):
     """
-    Proxy requests to go2rtc instance.
-    Required for HLS streaming (.m3u8 + .ts segments).
-    Reads fully while client is open, then streams chunks (avoids closed-connection 502).
-    No JWT auth - HLS/video requests do not send headers.
+    Production-safe streaming proxy for go2rtc HLS.
     """
-    from fastapi.responses import StreamingResponse, JSONResponse
+    from fastapi.responses import StreamingResponse, Response
 
     settings = get_settings()
     base = settings.go2rtc_url.rstrip("/")
-    url = f"{base}/{path}" + (f"?{request.url.query}" if request.url.query else "")
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            response = await client.get(url, follow_redirects=True)
-            content = response.content
-            status_code = response.status_code
-            content_type = response.headers.get(
-                "content-type", "application/octet-stream"
-            )
+    query_string = request.url.query
+    if query_string:
+        url = f"{base}/{path}?{query_string}"
+    else:
+        url = f"{base}/{path}"
 
-        def iter_chunks():
-            chunk_size = 64 * 1024
-            for i in range(0, len(content), chunk_size):
-                yield content[i : i + chunk_size]
+    try:
+        async def stream_chunks():
+            async with go2rtc_client.stream("GET", url, follow_redirects=True) as upstream:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
 
         return StreamingResponse(
-            iter_chunks(),
-            status_code=status_code,
-            headers={"Content-Type": content_type},
+            stream_chunks(),
+            status_code=200,
+            headers={"Content-Type": "application/octet-stream"},
         )
     except Exception as e:
         logging.warning("go2rtc proxy failed %s: %s", url, e)
-        return JSONResponse(
+        return Response(
+            content=f"Proxy error: {str(e)}",
             status_code=502,
-            content={"detail": f"go2rtc proxy error: {str(e)}"},
         )
