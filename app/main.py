@@ -52,6 +52,7 @@ CSP = (
     "media-src 'self' blob:; "
     "script-src 'self' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline'; "
+    "font-src 'self' data:; "
     "frame-src 'self'"
 )
 
