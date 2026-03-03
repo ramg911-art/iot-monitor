@@ -333,7 +333,8 @@
 
     let cameraGridPage = 1;
     const cameraGridPerPage = 16;
-    const webrtcConnections = {};
+    const MODAL_KEY = '__modal';
+    const activePeers = {};
 
     function waitForIceGathering(pc) {
       return new Promise((resolve) => {
@@ -342,12 +343,34 @@
       });
     }
 
-    async function startWebRTC(videoElement, streamName, placeholderEl) {
+    function closeGridPeers() {
+      Object.entries(activePeers).forEach(([key, pc]) => {
+        if (key !== MODAL_KEY) {
+          try { pc.close(); } catch (_) {}
+          delete activePeers[key];
+        }
+      });
+    }
+
+    async function startWebRTC(videoElement, streamName, placeholderEl, isModal) {
       if (!videoElement || !streamName) return;
+      if (isModal) {
+        if (activePeers[MODAL_KEY]) {
+          try { activePeers[MODAL_KEY].close(); } catch (_) {}
+          delete activePeers[MODAL_KEY];
+        }
+      } else {
+        if (activePeers[streamName]) return;
+        closeGridPeers();
+      }
+
       const pc = new RTCPeerConnection();
-      webrtcConnections['modal'] = pc;
-      if (placeholderEl) placeholderEl.style.display = 'flex';
-      if (placeholderEl) placeholderEl.textContent = 'Connecting…';
+      activePeers[isModal ? MODAL_KEY : streamName] = pc;
+
+      if (placeholderEl) {
+        placeholderEl.style.display = 'flex';
+        placeholderEl.textContent = 'Connecting…';
+      }
       videoElement.onerror = () => {
         if (placeholderEl) { placeholderEl.textContent = 'Stream unavailable'; placeholderEl.style.display = 'flex'; }
       };
@@ -356,8 +379,13 @@
         videoElement.srcObject = event.streams[0];
       };
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed' && placeholderEl) { placeholderEl.textContent = 'Connection failed'; placeholderEl.style.display = 'flex'; }
+        if (pc.connectionState === 'failed' && placeholderEl) { placeholderEl.textContent = 'Offline'; placeholderEl.style.display = 'flex'; }
+        if (pc.connectionState === 'closed' || pc.connectionState === 'failed') {
+          const key = isModal ? MODAL_KEY : streamName;
+          if (activePeers[key] === pc) delete activePeers[key];
+        }
       };
+
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       await waitForIceGathering(pc);
@@ -387,63 +415,50 @@
       const grid = document.getElementById('camera-grid-4x4');
       if (!grid) return;
       if (data && data.go2rtc_url) go2rtcUrl = data.go2rtc_url.replace(/\/$/, '');
-      Object.entries(webrtcConnections).forEach(([k, pc]) => {
-        if (k !== 'modal') { try { pc.close(); } catch (_) {} }
-      });
-      Object.keys(webrtcConnections).forEach(k => { if (k !== 'modal') delete webrtcConnections[k]; });
+      closeGridPeers();
+
       const items = data.items || [];
       if (items.length === 0) {
         grid.innerHTML = '<p style="grid-column:1/-1;color:var(--muted);padding:24px">No NVR cameras. Add an NVR in the Dahua NVR section below.</p>';
         return;
       }
-      grid.innerHTML = items.map((cam) => {
-        const elId = 'cam-video-' + cam.id;
+
+      grid.innerHTML = '';
+      items.forEach((cam) => {
         const streamName = cam.stream_name || '';
         const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
-        return `
-          <div class="camera-cell" data-stream-name="${(streamName || '').split('"').join('&quot;')}" data-name="${(cam.name || '').split('"').join('&quot;')}" data-id="${cam.id}">
-            <video id="${elId}" autoplay muted playsinline></video>
-            <div class="cell-placeholder" id="${elId}-ph">Loading...</div>
-            <div class="cell-label">${label}</div>
-          </div>
-        `;
-      }).join('');
-      items.forEach((cam) => {
-        const elId = 'cam-video-' + cam.id;
-        const videoEl = document.getElementById(elId);
-        const phEl = document.getElementById(elId + '-ph');
-        const streamName = cam.stream_name || '';
-        if (videoEl && streamName) {
-          const pc = new RTCPeerConnection();
-          webrtcConnections[elId] = pc;
-          pc.ontrack = (event) => {
-            videoEl.srcObject = event.streams[0];
-            if (phEl) phEl.style.display = 'none';
-          };
-          pc.onconnectionstatechange = () => {
-            if (pc.connectionState === 'failed' && phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; }
-          };
-          pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => waitForIceGathering(pc)).then(() =>
-            fetch(`/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/sdp' },
-              body: pc.localDescription.sdp
-            })
-          ).then(r => r.ok ? r.text() : Promise.reject()).then(answerSDP =>
-            pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerSDP }))
-          ).catch(() => {
-            if (phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; }
-          });
-        } else if (phEl) {
-          phEl.textContent = 'No stream';
-        }
-      });
-      grid.querySelectorAll('.camera-cell').forEach(cell => {
-        cell.onclick = () => {
-          const streamName = cell.dataset.streamName || '';
-          const name = cell.dataset.name || 'Camera';
-          openCameraModal(streamName, name);
-        };
+        const cell = document.createElement('div');
+        cell.className = 'camera-cell';
+        cell.dataset.streamName = streamName;
+        cell.dataset.name = cam.name || 'Camera';
+        cell.dataset.id = cam.id;
+
+        const video = document.createElement('video');
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.setAttribute('playsinline', '');
+        video.setAttribute('muted', '');
+
+        const placeholder = document.createElement('div');
+        placeholder.className = 'cell-placeholder';
+        placeholder.textContent = streamName ? 'Click to start' : 'No stream';
+
+        const labelEl = document.createElement('div');
+        labelEl.className = 'cell-label';
+        labelEl.textContent = label;
+
+        cell.appendChild(video);
+        cell.appendChild(placeholder);
+        cell.appendChild(labelEl);
+
+        cell.addEventListener('click', () => {
+          if (!streamName) return;
+          startWebRTC(video, streamName, placeholder, false);
+          openCameraModal(streamName, cell.dataset.name || 'Camera');
+        });
+
+        grid.appendChild(cell);
       });
     }
 
@@ -468,7 +483,7 @@
       const placeholder = document.getElementById('camera-modal-placeholder');
       if (!modal || !video) return;
       title.textContent = name || 'Camera';
-      if (webrtcConnections['modal']) { try { webrtcConnections['modal'].close(); } catch (_) {} delete webrtcConnections['modal']; }
+      if (activePeers[MODAL_KEY]) { try { activePeers[MODAL_KEY].close(); } catch (_) {} delete activePeers[MODAL_KEY]; }
       video.srcObject = null;
       video.src = '';
       if (placeholder) { placeholder.textContent = 'Connecting…'; placeholder.style.display = 'flex'; }
@@ -480,7 +495,7 @@
       modal.classList.add('open');
       if (streamName) {
         try {
-          await startWebRTC(video, streamName, placeholder);
+          await startWebRTC(video, streamName, placeholder, true);
         } catch (e) {
           console.warn('WebRTC failed:', e);
           if (placeholder) { placeholder.textContent = 'Connection failed'; placeholder.style.display = 'flex'; }
@@ -492,7 +507,7 @@
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
       if (video) { video.pause(); video.srcObject = null; video.src = ''; }
-      if (webrtcConnections['modal']) { try { webrtcConnections['modal'].close(); } catch (_) {} delete webrtcConnections['modal']; }
+      if (activePeers[MODAL_KEY]) { try { activePeers[MODAL_KEY].close(); } catch (_) {} delete activePeers[MODAL_KEY]; }
       if (modal) modal.classList.remove('open');
     }
 
