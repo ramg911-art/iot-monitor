@@ -190,7 +190,7 @@
 
       <div class="section">
         <h2>Cameras</h2>
-        <div id="nvr-cameras-grid" class="nvr-grid"></div>
+        <div id="nvr-grid" class="nvr-grid"></div>
         <div id="camera-pagination" class="pagination"></div>
       </div>
 
@@ -411,9 +411,9 @@
     }
 
     function renderNvrCameraTiles(cameras) {
-      const grid = document.getElementById('nvr-cameras-grid');
+      const grid = document.getElementById('nvr-grid');
       if (!grid) {
-        console.error('Visible NVR grid container (#nvr-cameras-grid) not found');
+        console.error('Visible NVR grid container not found');
         return;
       }
       closeGridPeers();
@@ -436,8 +436,6 @@
         video.autoplay = true;
         video.playsInline = true;
         video.muted = true;
-        video.setAttribute('playsinline', '');
-        video.setAttribute('muted', '');
         video.style.width = '100%';
         video.style.height = '100%';
         video.style.objectFit = 'cover';
