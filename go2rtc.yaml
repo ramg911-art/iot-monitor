@@ -4,7 +4,7 @@
 
 api:
   listen: ":1984"
-  cors: "*"
+  origin: "*"   # CORS: allow browser to POST to /api/webrtc from other origins
 
 webrtc:
   listen: ":8555"
