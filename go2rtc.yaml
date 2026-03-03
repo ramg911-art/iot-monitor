@@ -1,6 +1,16 @@
 # go2rtc configuration
 # Add your RTSP camera streams here
 # https://github.com/blakeblackshear/frigate/tree/master/go2rtc
+#
+# If you use the iot-monitor app (streams via proxy), WebRTC media must reach go2rtc.
+# When the app proxies signaling, go2rtc may see 127.0.0.1 and put that in ICE candidates;
+# the browser then cannot connect. Add your host's LAN IP so the browser can connect:
+#
+# webrtc:
+#   candidates:
+#     - 10.0.10.225:8555
+#
+# Replace 10.0.10.225 with your server's IP and 8555 with go2rtc's WebRTC port (default 8555).
 
 streams:
   # Example:

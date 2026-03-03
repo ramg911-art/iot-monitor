@@ -254,8 +254,9 @@
         <video id="camera-modal-video" controls muted autoplay playsinline style="width:100%;display:block"></video>
         <div id="camera-modal-placeholder" style="position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:0.9rem;background:rgba(0,0,0,0.8)">Connecting…</div>
       </div>
-      <div class="actions" style="margin-top:12px">
+      <div class="actions" style="margin-top:12px;display:flex;gap:12px;flex-wrap:wrap;align-items:center">
         <button class="secondary" onclick="closeCameraModal()">Close</button>
+        <a id="camera-modal-open-go2rtc" href="#" target="_blank" rel="noopener" style="font-size:0.85rem;color:var(--accent)">Open in go2rtc</a>
       </div>
     </div>
   </div>
@@ -380,9 +381,12 @@
       renderCameraPagination(data);
     }
 
+    let go2rtcUrl = '';
+
     function renderCameraGrid4x4(data) {
       const grid = document.getElementById('camera-grid-4x4');
       if (!grid) return;
+      if (data && data.go2rtc_url) go2rtcUrl = data.go2rtc_url.replace(/\/$/, '');
       Object.entries(webrtcConnections).forEach(([k, pc]) => {
         if (k !== 'modal') { try { pc.close(); } catch (_) {} }
       });
@@ -468,6 +472,11 @@
       video.srcObject = null;
       video.src = '';
       if (placeholder) { placeholder.textContent = 'Connecting…'; placeholder.style.display = 'flex'; }
+      const openGo2rtcLink = document.getElementById('camera-modal-open-go2rtc');
+      if (openGo2rtcLink) {
+        openGo2rtcLink.href = go2rtcUrl ? `${go2rtcUrl}/api/stream.html?src=${encodeURIComponent(streamName)}` : '#';
+        openGo2rtcLink.style.display = streamName && go2rtcUrl ? 'inline' : 'none';
+      }
       modal.classList.add('open');
       if (streamName) {
         try {

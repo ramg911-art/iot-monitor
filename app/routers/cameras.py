@@ -143,13 +143,15 @@ async def list_nvr_cameras_paginated(
         }
 
 
-GO2RTC_URL = "http://127.0.0.1:1984"
 _go2rtc_client = httpx.AsyncClient(timeout=None)
+_FALLBACK_GO2RTC = "http://127.0.0.1:1984"
 
 
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def go2rtc_proxy(path: str, request: Request):
-    target_url = f"{GO2RTC_URL}/{path}"
+    settings = get_settings()
+    base = (settings.go2rtc_url or _FALLBACK_GO2RTC).rstrip("/")
+    target_url = f"{base}/{path}"
     if request.url.query:
         target_url += f"?{request.url.query}"
 
@@ -162,12 +164,24 @@ async def go2rtc_proxy(path: str, request: Request):
     }
 
     if request.method in ("POST", "OPTIONS"):
-        resp = await _go2rtc_client.request(
-            request.method,
-            target_url,
-            content=body,
-            headers=headers,
-        )
+        try:
+            resp = await _go2rtc_client.request(
+                request.method,
+                target_url,
+                content=body,
+                headers=headers,
+            )
+        except httpx.ConnectError:
+            if base != _FALLBACK_GO2RTC and "go2rtc" in base.lower():
+                fallback_url = f"{_FALLBACK_GO2RTC}/{path}" + (f"?{request.url.query}" if request.url.query else "")
+                resp = await _go2rtc_client.request(
+                    request.method,
+                    fallback_url,
+                    content=body,
+                    headers=headers,
+                )
+            else:
+                raise
         return Response(
             content=resp.content,
             status_code=resp.status_code,
