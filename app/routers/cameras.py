@@ -144,6 +144,7 @@ async def list_nvr_cameras_paginated(
 
 
 GO2RTC_URL = "http://127.0.0.1:1984"
+_go2rtc_client = httpx.AsyncClient(timeout=None)
 
 
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
@@ -160,10 +161,8 @@ async def go2rtc_proxy(path: str, request: Request):
         if k.lower() not in ["host", "content-length", "origin"]
     }
 
-    client = httpx.AsyncClient(timeout=None)
-
     async def stream_generator():
-        async with client.stream(
+        async with _go2rtc_client.stream(
             request.method,
             target_url,
             content=body,
@@ -171,7 +170,6 @@ async def go2rtc_proxy(path: str, request: Request):
         ) as resp:
             async for chunk in resp.aiter_raw():
                 yield chunk
-        await client.aclose()
 
     return StreamingResponse(
         stream_generator(),
