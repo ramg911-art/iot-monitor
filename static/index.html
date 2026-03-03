@@ -190,7 +190,7 @@
 
       <div class="section">
         <h2>Cameras</h2>
-        <div class="nvr-grid"></div>
+        <div class="nvr-grid cameras-grid"></div>
         <div id="camera-pagination" class="pagination"></div>
       </div>
 
@@ -411,12 +411,12 @@
     }
 
     function renderNvrCameraTiles(cameras) {
-      const grid = document.querySelector('.nvr-grid');
+      const grid = document.querySelector('.cameras-grid');
       if (!grid) return;
       closeGridPeers();
       grid.innerHTML = '';
 
-      if (!cameras.length) {
+      if (!cameras || !cameras.length) {
         const empty = document.createElement('p');
         empty.style.cssText = 'grid-column:1/-1;color:var(--muted);padding:24px';
         empty.textContent = 'No NVR cameras. Add an NVR in the Dahua NVR section below.';
@@ -435,6 +435,9 @@
         video.muted = true;
         video.setAttribute('playsinline', '');
         video.setAttribute('muted', '');
+        video.style.width = '100%';
+        video.style.height = '100%';
+        video.style.objectFit = 'cover';
 
         tile.appendChild(video);
         grid.appendChild(tile);
@@ -447,7 +450,7 @@
       const streamName = tile.dataset.streamName;
       const video = tile.querySelector('video');
       if (!streamName || !video) return;
-      await startWebRTC(streamName, video, null, false);
+      await startWebRTC(streamName, video);
     });
 
     function renderCameraPagination(data) {
