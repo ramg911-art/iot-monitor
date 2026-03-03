@@ -157,11 +157,9 @@
     .lan-badge.lan-cloud { background: #e6a23c; color: var(--bg); }
     .prefer-lan-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; color: var(--muted); cursor: pointer; margin-left: 8px; }
     .prefer-lan-toggle input { cursor: pointer; }
-    .camera-grid-4x4 { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
-    .camera-grid-4x4 .camera-cell { aspect-ratio: 16/9; background: var(--surface); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); cursor: pointer; position: relative; }
-    .camera-grid-4x4 .camera-cell video { width: 100%; height: 100%; object-fit: cover; }
-    .camera-grid-4x4 .camera-cell .cell-label { position: absolute; bottom: 0; left: 0; right: 0; padding: 6px 8px; background: linear-gradient(transparent, rgba(0,0,0,0.8)); color: #fff; font-size: 0.75rem; }
-    .camera-grid-4x4 .camera-cell .cell-placeholder { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 0.85rem; }
+    .nvr-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .nvr-camera-card { aspect-ratio: 16/9; background: var(--surface); border-radius: var(--radius); overflow: hidden; border: 1px solid var(--border); cursor: pointer; position: relative; }
+    .nvr-camera-card video { width: 100%; height: 100%; object-fit: cover; display: block; }
     .pagination { display: flex; align-items: center; gap: 8px; margin-top: 16px; flex-wrap: wrap; }
     .pagination button { padding: 6px 12px; background: var(--border); border: none; border-radius: var(--radius); color: var(--text); cursor: pointer; font-family: inherit; }
     .pagination button:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -192,7 +190,7 @@
 
       <div class="section">
         <h2>Cameras</h2>
-        <div id="camera-grid-4x4" class="camera-grid-4x4"></div>
+        <div class="nvr-grid"></div>
         <div id="camera-pagination" class="pagination"></div>
       </div>
 
@@ -352,8 +350,8 @@
       });
     }
 
-    async function startWebRTC(videoElement, streamName, placeholderEl, isModal) {
-      if (!videoElement || !streamName) return;
+    async function startWebRTC(streamName, videoElement, placeholderEl, isModal) {
+      if (!streamName || !videoElement) return;
       if (isModal) {
         if (activePeers[MODAL_KEY]) {
           try { activePeers[MODAL_KEY].close(); } catch (_) {}
@@ -402,36 +400,34 @@
       await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerSDP }));
     }
 
+    let go2rtcUrl = '';
+
     async function loadNvrCamerasGrid(page) {
       const data = await api('GET', `/cameras/nvr-cameras?page=${page}&per_page=${cameraGridPerPage}`);
       if (!data) return;
-      renderCameraGrid4x4(data);
+      if (data.go2rtc_url) go2rtcUrl = data.go2rtc_url.replace(/\/$/, '');
+      renderNvrCameraTiles(data.items || []);
       renderCameraPagination(data);
     }
 
-    let go2rtcUrl = '';
-
-    function renderCameraGrid4x4(data) {
-      const grid = document.getElementById('camera-grid-4x4');
+    function renderNvrCameraTiles(cameras) {
+      const grid = document.querySelector('.nvr-grid');
       if (!grid) return;
-      if (data && data.go2rtc_url) go2rtcUrl = data.go2rtc_url.replace(/\/$/, '');
       closeGridPeers();
+      grid.innerHTML = '';
 
-      const items = data.items || [];
-      if (items.length === 0) {
-        grid.innerHTML = '<p style="grid-column:1/-1;color:var(--muted);padding:24px">No NVR cameras. Add an NVR in the Dahua NVR section below.</p>';
+      if (!cameras.length) {
+        const empty = document.createElement('p');
+        empty.style.cssText = 'grid-column:1/-1;color:var(--muted);padding:24px';
+        empty.textContent = 'No NVR cameras. Add an NVR in the Dahua NVR section below.';
+        grid.appendChild(empty);
         return;
       }
 
-      grid.innerHTML = '';
-      items.forEach((cam) => {
-        const streamName = cam.stream_name || '';
-        const label = cam.name + (cam.parent_name ? ' · ' + cam.parent_name : '');
-        const cell = document.createElement('div');
-        cell.className = 'camera-cell';
-        cell.dataset.streamName = streamName;
-        cell.dataset.name = cam.name || 'Camera';
-        cell.dataset.id = cam.id;
+      cameras.forEach((cam) => {
+        const tile = document.createElement('div');
+        tile.className = 'nvr-camera-card';
+        tile.dataset.streamName = cam.stream_name || '';
 
         const video = document.createElement('video');
         video.autoplay = true;
@@ -440,27 +436,19 @@
         video.setAttribute('playsinline', '');
         video.setAttribute('muted', '');
 
-        const placeholder = document.createElement('div');
-        placeholder.className = 'cell-placeholder';
-        placeholder.textContent = streamName ? 'Click to start' : 'No stream';
-
-        const labelEl = document.createElement('div');
-        labelEl.className = 'cell-label';
-        labelEl.textContent = label;
-
-        cell.appendChild(video);
-        cell.appendChild(placeholder);
-        cell.appendChild(labelEl);
-
-        cell.addEventListener('click', () => {
-          if (!streamName) return;
-          startWebRTC(video, streamName, placeholder, false);
-          openCameraModal(streamName, cell.dataset.name || 'Camera');
-        });
-
-        grid.appendChild(cell);
+        tile.appendChild(video);
+        grid.appendChild(tile);
       });
     }
+
+    document.addEventListener('click', async function (e) {
+      const tile = e.target.closest('.nvr-camera-card');
+      if (!tile) return;
+      const streamName = tile.dataset.streamName;
+      const video = tile.querySelector('video');
+      if (!streamName || !video) return;
+      await startWebRTC(streamName, video, null, false);
+    });
 
     function renderCameraPagination(data) {
       const pag = document.getElementById('camera-pagination');
@@ -495,7 +483,7 @@
       modal.classList.add('open');
       if (streamName) {
         try {
-          await startWebRTC(video, streamName, placeholder, true);
+          await startWebRTC(streamName, video, placeholder, true);
         } catch (e) {
           console.warn('WebRTC failed:', e);
           if (placeholder) { placeholder.textContent = 'Connection failed'; placeholder.style.display = 'flex'; }
