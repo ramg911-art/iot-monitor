@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from typing import Optional
 
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 
 from app.config import get_settings
 from app.database import async_session_maker, commit_with_retry, db_write_lock
@@ -101,7 +102,7 @@ async def _poll_tapo_with_broadcast() -> None:
             Device.ip_address.isnot(None),
         )
         result = await session.execute(stmt)
-        rows = result.all()
+        rows = list(result.all())
 
     for row in rows:
         device_id, device_name, ip_address = row[0], row[1], row[2]
@@ -120,6 +121,11 @@ async def tapo_poll_loop() -> None:
         except asyncio.CancelledError:
             logger.info("Tapo poll loop cancelled")
             break
+        except ProgrammingError as e:
+            if "closed" in str(e).lower() or "Cannot operate" in str(e):
+                logger.info("Tapo poll loop stopping (database closed)")
+                break
+            logger.exception("Tapo poll loop error: %s", e)
         except Exception as e:
             logger.exception("Tapo poll loop error: %s", e)
         await asyncio.sleep(interval)

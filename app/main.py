@@ -36,6 +36,8 @@ async def lifespan(app: FastAPI):
     await ewelink_lan_service.stop()
     for t in _bg_tasks:
         t.cancel()
+    if _bg_tasks:
+        await asyncio.gather(*_bg_tasks, return_exceptions=True)
     logger.info("Shutdown complete")
 
 
