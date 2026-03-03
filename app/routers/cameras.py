@@ -160,19 +160,21 @@ async def go2rtc_proxy(path: str, request: Request):
         if k.lower() not in ["host", "content-length"]
     }
 
-    async with httpx.AsyncClient(timeout=None) as client:
+    client = httpx.AsyncClient(timeout=None)
+
+    async def stream_generator():
         async with client.stream(
             request.method,
             target_url,
             content=body,
             headers=headers,
         ) as resp:
-            return StreamingResponse(
-                resp.aiter_raw(),
-                status_code=resp.status_code,
-                headers={
-                    k: v
-                    for k, v in resp.headers.items()
-                    if k.lower() != "content-length"
-                },
-            )
+            async for chunk in resp.aiter_raw():
+                yield chunk
+        await client.aclose()
+
+    return StreamingResponse(
+        stream_generator(),
+        status_code=200,
+        media_type="application/sdp",
+    )
