@@ -3,7 +3,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response, StreamingResponse
+from fastapi.responses import Response
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -143,64 +143,36 @@ async def list_nvr_cameras_paginated(
         }
 
 
-_go2rtc_client = httpx.AsyncClient(timeout=None)
-_FALLBACK_GO2RTC = "http://127.0.0.1:1984"
-
-
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def go2rtc_proxy(path: str, request: Request):
-    settings = get_settings()
-    base = (settings.go2rtc_url or _FALLBACK_GO2RTC).rstrip("/")
-    target_url = f"{base}/{path}"
-    if request.url.query:
-        target_url += f"?{request.url.query}"
+    target_url = f"http://127.0.0.1:1984/{path}"
 
-    body = await request.body()
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        if request.method == "POST":
+            body = await request.body()
 
-    headers = {
-        k: v
-        for k, v in request.headers.items()
-        if k.lower() not in ["host", "content-length", "origin"]
-    }
-
-    if request.method in ("POST", "OPTIONS"):
-        try:
-            resp = await _go2rtc_client.request(
-                request.method,
+            response = await client.post(
                 target_url,
                 content=body,
-                headers=headers,
+                params=request.query_params,
+                headers={
+                    "Content-Type": request.headers.get(
+                        "content-type",
+                        "application/sdp"
+                    )
+                },
             )
-        except httpx.ConnectError:
-            if base != _FALLBACK_GO2RTC and "go2rtc" in base.lower():
-                fallback_url = f"{_FALLBACK_GO2RTC}/{path}" + (f"?{request.url.query}" if request.url.query else "")
-                resp = await _go2rtc_client.request(
-                    request.method,
-                    fallback_url,
-                    content=body,
-                    headers=headers,
-                )
-            else:
-                raise
-        return Response(
-            content=resp.content,
-            status_code=resp.status_code,
-            headers=dict(resp.headers),
-            media_type=resp.headers.get("content-type"),
-        )
+        else:
+            response = await client.get(
+                target_url,
+                params=request.query_params
+            )
 
-    async def stream_generator():
-        async with _go2rtc_client.stream(
-            request.method,
-            target_url,
-            content=body,
-            headers=headers,
-        ) as resp:
-            async for chunk in resp.aiter_raw():
-                yield chunk
-
-    return StreamingResponse(
-        stream_generator(),
-        status_code=200,
-        media_type="application/sdp",
+    return Response(
+        content=response.content,
+        status_code=response.status_code,
+        media_type=response.headers.get(
+            "content-type",
+            "application/sdp"
+        ),
     )
