@@ -1,10 +1,6 @@
-# go2rtc configuration
-# Browser connects directly to go2rtc (no proxy). Ensure ports 1984 and 8555 are reachable.
-# https://github.com/blakeblackshear/frigate/tree/master/go2rtc
-
 api:
   listen: ":1984"
-  origin: "*"   # CORS: allow browser to POST to /api/webrtc from other origins
+  cors: "*"
 
 webrtc:
   listen: ":8555"
@@ -12,6 +8,7 @@ webrtc:
     - 10.0.10.225:8555
 
 streams:
-  # Example:
-  # front_door: rtsp://user:pass@192.168.1.10:554/stream1
-  # garage: rtsp://admin:admin@192.168.1.11:554/cam/realmonitor?channel=1&subtype=0
+  nvr_ch1: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=1&subtype=1
+  nvr_ch2: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=2&subtype=1
+  nvr_ch3: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=3&subtype=1
+  nvr_ch4: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=4&subtype=1
