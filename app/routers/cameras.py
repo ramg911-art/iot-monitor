@@ -2,7 +2,7 @@
 import re
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 from sqlalchemy import select, func
 import httpx
 
@@ -23,12 +23,21 @@ async def webrtc_signal(
     """
     Same-origin WebRTC signaling (SDP exchange). Forwards to go2rtc to avoid CORS.
     Media still flows directly browser <-> go2rtc; only the offer/answer is relayed.
+    When running the app on the host (not in Docker), set GO2RTC_URL to a reachable
+    URL (e.g. http://127.0.0.1:1984 or http://10.0.10.225:1984).
     """
     body = await request.body()
     settings = get_settings()
     url = f"{settings.go2rtc_url.rstrip('/')}/api/webrtc?src={src}"
-    async with httpx.AsyncClient(timeout=10) as client:
-        r = await client.post(url, content=body, headers={"Content-Type": "application/sdp"})
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.post(url, content=body, headers={"Content-Type": "application/sdp"})
+    except httpx.ConnectError:
+        # e.g. "Temporary failure in name resolution" when GO2RTC_URL uses Docker name "go2rtc" but app runs on host
+        return JSONResponse(
+            status_code=502,
+            content={"detail": "Cannot reach go2rtc. Set GO2RTC_URL to a URL reachable from this server (e.g. http://127.0.0.1:1984)."},
+        )
     return PlainTextResponse(content=r.text, status_code=r.status_code, media_type="application/sdp")
 
 
