@@ -3,6 +3,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import Response
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -147,19 +148,16 @@ GO2RTC_URL = "http://127.0.0.1:1984"
 
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def go2rtc_proxy(path: str, request: Request):
-    """Raw passthrough proxy for go2rtc. Does not modify request/response."""
-    from fastapi.responses import Response
-
     target_url = f"{GO2RTC_URL}/{path}"
     if request.url.query:
         target_url += f"?{request.url.query}"
 
-    body = await request.body()
+    body = await request.body()  # MUST be raw bytes
 
-    forward_headers = {
-        key: value
-        for key, value in request.headers.items()
-        if key.lower() not in ("host", "content-length")
+    headers = {
+        k: v
+        for k, v in request.headers.items()
+        if k.lower() not in ["host", "content-length"]
     }
 
     async with httpx.AsyncClient(timeout=None) as client:
@@ -167,7 +165,7 @@ async def go2rtc_proxy(path: str, request: Request):
             method=request.method,
             url=target_url,
             content=body,
-            headers=forward_headers,
+            headers=headers,
         )
 
     return Response(
