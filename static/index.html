@@ -331,6 +331,13 @@
     const cameraGridPerPage = 16;
     const webrtcConnections = {};
 
+    function waitForIceGathering(pc) {
+      return new Promise((resolve) => {
+        if (pc.iceGatheringState === 'complete') return resolve();
+        pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
+      });
+    }
+
     async function startWebRTC(videoElement, streamName) {
       if (!videoElement || !streamName) return;
       const pc = new RTCPeerConnection();
@@ -340,12 +347,13 @@
       };
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      await waitForIceGathering(pc);
       const response = await fetch(
         `/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`,
         {
           method: 'POST',
           headers: { 'Content-Type': 'application/sdp' },
-          body: offer.sdp
+          body: pc.localDescription.sdp
         }
       );
       if (!response.ok) throw new Error('WebRTC handshake failed');
@@ -399,7 +407,7 @@
           pc.onconnectionstatechange = () => {
             if (pc.connectionState === 'failed' && phEl) { phEl.textContent = 'Offline'; phEl.style.display = 'flex'; }
           };
-          pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() =>
+          pc.createOffer().then(offer => pc.setLocalDescription(offer)).then(() => waitForIceGathering(pc)).then(() =>
             fetch(`/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/sdp' },
