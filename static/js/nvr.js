@@ -64,7 +64,8 @@ function renderNvrList(devices, api, loadAll) {
   });
 }
 
-function renderNvrCameraTiles(streams) {
+/** Returns HTML string for camera frames (iframe-based). Not used for NVR grid tiles; index.html uses its own renderNvrCameraTiles for #nvr-grid. */
+function getNvrCameraFramesHtml(streams) {
   return (streams || []).map(s => {
     const isNvr = s.type === 'nvr_camera';
     const overlayCls = isNvr && !s.online ? 'stream-overlay offline' : 'stream-overlay';

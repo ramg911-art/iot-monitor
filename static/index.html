@@ -413,24 +413,16 @@
     function renderNvrCameraTiles(cameras) {
       const grid = document.getElementById('nvr-grid');
       if (!grid) {
-        console.error('Visible NVR grid container not found');
+        console.error('NVR grid container not found');
         return;
       }
       closeGridPeers();
       grid.innerHTML = '';
 
-      if (!cameras || !cameras.length) {
-        const empty = document.createElement('p');
-        empty.style.cssText = 'grid-column:1/-1;color:var(--muted);padding:24px';
-        empty.textContent = 'No NVR cameras. Add an NVR in the Dahua NVR section below.';
-        grid.appendChild(empty);
-        return;
-      }
-
       cameras.forEach((cam) => {
         const tile = document.createElement('div');
         tile.className = 'nvr-camera-card';
-        tile.dataset.streamName = cam.stream_name || '';
+        tile.dataset.streamName = cam.stream_name;
 
         const video = document.createElement('video');
         video.autoplay = true;
