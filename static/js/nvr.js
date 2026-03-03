@@ -48,41 +48,54 @@ function renderCameras(cameras) {
 
 async function startWebRTC(streamName, videoEl) {
     try {
-        const pc = new RTCPeerConnection();
+        console.log("Starting WebRTC for:", streamName);
+
+        const pc = new RTCPeerConnection({
+            iceServers: []
+        });
 
         pc.ontrack = (event) => {
+            console.log("Track received");
             videoEl.srcObject = event.streams[0];
         };
 
-        const offer = await pc.createOffer({
-            offerToReceiveVideo: true,
-            offerToReceiveAudio: false
-        });
+        pc.oniceconnectionstatechange = () => {
+            console.log("ICE state:", pc.iceConnectionState);
+        };
 
+        // Create offer
+        const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
 
-        const response = await fetch(getWebrtcSignalUrl(streamName), {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/sdp",
-                ...(localStorage.getItem("iot_token") ? { Authorization: "Bearer " + localStorage.getItem("iot_token") } : {})
-            },
-            body: pc.localDescription.sdp
-        });
+        console.log("Sending SDP offer to go2rtc...");
+
+        const response = await fetch(
+            `http://10.0.10.225:1984/api/webrtc?src=${streamName}`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/sdp" },
+                body: offer.sdp
+            }
+        );
+
+        const answerSDP = await response.text();
 
         if (!response.ok) {
-            throw new Error("WebRTC request failed");
+            console.error("go2rtc error response:", answerSDP);
+            throw new Error(`WebRTC failed: ${response.status}`);
         }
 
-        const answer = await response.text();
+        console.log("Received SDP answer");
 
         await pc.setRemoteDescription({
             type: "answer",
-            sdp: answer
+            sdp: answerSDP
         });
 
+        console.log("WebRTC connected");
+
     } catch (err) {
-        console.error("WebRTC error:", err);
+        console.error("WebRTC fatal error:", err);
     }
 }
 

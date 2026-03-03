@@ -8,7 +8,7 @@ webrtc:
     - 10.0.10.225:8555
 
 streams:
-  nvr_ch1: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=1&subtype=1
-  nvr_ch2: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=2&subtype=1
-  nvr_ch3: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=3&subtype=1
-  nvr_ch4: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=4&subtype=1
+  nvr_ch1: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=1&subtype=1#transport=tcp
+  nvr_ch2: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=2&subtype=1#transport=tcp
+  nvr_ch3: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=3&subtype=1#transport=tcp
+  nvr_ch4: rtsp://iot:Iotkollam@10.0.10.75:554/cam/realmonitor?channel=4&subtype=1#transport=tcp
