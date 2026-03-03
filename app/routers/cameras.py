@@ -159,13 +159,27 @@ async def go2rtc_proxy(path: str, request: Request):
         if k.lower() not in ["host", "content-length"]
     }
 
+    fallback_base = "http://127.0.0.1:1984"
+    fallback_url = f"{fallback_base}/{path}" + (f"?{request.url.query}" if request.url.query else "")
+
     async with httpx.AsyncClient(timeout=None) as client:
-        resp = await client.request(
-            method=request.method,
-            url=target_url,
-            content=body,
-            headers=headers,
-        )
+        try:
+            resp = await client.request(
+                method=request.method,
+                url=target_url,
+                content=body,
+                headers=headers,
+            )
+        except httpx.ConnectError:
+            if target_url != fallback_url and "go2rtc" in base.lower():
+                resp = await client.request(
+                    method=request.method,
+                    url=fallback_url,
+                    content=body,
+                    headers=headers,
+                )
+            else:
+                raise
 
     return Response(
         content=resp.content,
