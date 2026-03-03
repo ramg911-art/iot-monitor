@@ -161,20 +161,18 @@ async def go2rtc_proxy(path: str, request: Request):
     }
 
     async with httpx.AsyncClient(timeout=None) as client:
-        resp = await client.request(
+        async with client.stream(
             request.method,
             target_url,
             content=body,
             headers=headers,
-            stream=True,
-        )
-
-        return StreamingResponse(
-            resp.aiter_raw(),
-            status_code=resp.status_code,
-            headers={
-                k: v
-                for k, v in resp.headers.items()
-                if k.lower() != "content-length"
-            },
-        )
+        ) as resp:
+            return StreamingResponse(
+                resp.aiter_raw(),
+                status_code=resp.status_code,
+                headers={
+                    k: v
+                    for k, v in resp.headers.items()
+                    if k.lower() != "content-length"
+                },
+            )
