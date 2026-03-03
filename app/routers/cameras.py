@@ -143,12 +143,11 @@ async def list_nvr_cameras_paginated(
         }
 
 
-GO2RTC_URL = "http://127.0.0.1:1984"
-
-
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def go2rtc_proxy(path: str, request: Request):
-    target_url = f"{GO2RTC_URL}/{path}"
+    settings = get_settings()
+    base = settings.go2rtc_url.rstrip("/")
+    target_url = f"{base}/{path}"
     if request.url.query:
         target_url += f"?{request.url.query}"
 
