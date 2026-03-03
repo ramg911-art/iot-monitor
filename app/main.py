@@ -44,6 +44,25 @@ app = FastAPI(
     description="Production-grade single-user IoT monitoring platform",
     lifespan=lifespan,
 )
+
+CSP = (
+    "default-src 'self'; "
+    "connect-src 'self' http: ws:; "
+    "img-src 'self' data: blob:; "
+    "media-src 'self' blob:; "
+    "script-src 'self' https://cdn.jsdelivr.net; "
+    "style-src 'self' 'unsafe-inline'; "
+    "frame-src 'self'"
+)
+
+
+@app.middleware("http")
+async def add_csp_header(request, call_next):
+    response = await call_next(request)
+    response.headers["Content-Security-Policy"] = CSP
+    return response
+
+
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
 app.include_router(auth.router)
