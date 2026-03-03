@@ -3,7 +3,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -143,15 +143,16 @@ async def list_nvr_cameras_paginated(
         }
 
 
+GO2RTC_URL = "http://127.0.0.1:1984"
+
+
 @router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
 async def go2rtc_proxy(path: str, request: Request):
-    settings = get_settings()
-    base = settings.go2rtc_url.rstrip("/")
-    target_url = f"{base}/{path}"
+    target_url = f"{GO2RTC_URL}/{path}"
     if request.url.query:
         target_url += f"?{request.url.query}"
 
-    body = await request.body()  # MUST be raw bytes
+    body = await request.body()
 
     headers = {
         k: v
@@ -159,31 +160,21 @@ async def go2rtc_proxy(path: str, request: Request):
         if k.lower() not in ["host", "content-length"]
     }
 
-    fallback_base = "http://127.0.0.1:1984"
-    fallback_url = f"{fallback_base}/{path}" + (f"?{request.url.query}" if request.url.query else "")
-
     async with httpx.AsyncClient(timeout=None) as client:
-        try:
-            resp = await client.request(
-                method=request.method,
-                url=target_url,
-                content=body,
-                headers=headers,
-            )
-        except httpx.ConnectError:
-            if target_url != fallback_url and "go2rtc" in base.lower():
-                resp = await client.request(
-                    method=request.method,
-                    url=fallback_url,
-                    content=body,
-                    headers=headers,
-                )
-            else:
-                raise
+        resp = await client.request(
+            request.method,
+            target_url,
+            content=body,
+            headers=headers,
+            stream=True,
+        )
 
-    return Response(
-        content=resp.content,
-        status_code=resp.status_code,
-        headers=dict(resp.headers),
-        media_type=resp.headers.get("content-type"),
-    )
+        return StreamingResponse(
+            resp.aiter_raw(),
+            status_code=resp.status_code,
+            headers={
+                k: v
+                for k, v in resp.headers.items()
+                if k.lower() != "content-length"
+            },
+        )
