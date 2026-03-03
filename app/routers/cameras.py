@@ -1,7 +1,8 @@
 """Camera management - go2rtc stream list and NVR camera metadata (no WebRTC proxy)."""
 import re
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import PlainTextResponse
 from sqlalchemy import select, func
 import httpx
 
@@ -11,6 +12,24 @@ from app.database import async_session_maker
 from app.models.device import Device, DEVICE_TYPE_NVR_CAMERA
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
+
+
+@router.post("/webrtc-signal")
+async def webrtc_signal(
+    request: Request,
+    src: str = Query(..., alias="src"),
+    user_id: int = Depends(get_current_user_id),
+):
+    """
+    Same-origin WebRTC signaling (SDP exchange). Forwards to go2rtc to avoid CORS.
+    Media still flows directly browser <-> go2rtc; only the offer/answer is relayed.
+    """
+    body = await request.body()
+    settings = get_settings()
+    url = f"{settings.go2rtc_url.rstrip('/')}/api/webrtc?src={src}"
+    async with httpx.AsyncClient(timeout=10) as client:
+        r = await client.post(url, content=body, headers={"Content-Type": "application/sdp"})
+    return PlainTextResponse(content=r.text, status_code=r.status_code, media_type="application/sdp")
 
 
 def _get_nvr_stream_name(cam) -> str:

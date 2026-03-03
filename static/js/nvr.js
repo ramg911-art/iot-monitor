@@ -1,5 +1,10 @@
 const GO2RTC_URL = "http://10.0.10.225:1984";
 
+/** Same-origin signaling URL (avoids CORS). Backend forwards to go2rtc; media still goes direct to go2rtc. */
+function getWebrtcSignalUrl(streamName) {
+    return `/api/cameras/webrtc-signal?src=${encodeURIComponent(streamName)}`;
+}
+
 async function fetchCameras() {
     const token = localStorage.getItem("iot_token") || "";
     const res = await fetch("/api/cameras/nvr-cameras?page=1&per_page=16", {
@@ -56,14 +61,14 @@ async function startWebRTC(streamName, videoEl) {
 
         await pc.setLocalDescription(offer);
 
-        const response = await fetch(
-            `${GO2RTC_URL}/api/webrtc?src=${encodeURIComponent(streamName)}`,
-            {
-                method: "POST",
-                headers: { "Content-Type": "application/sdp" },
-                body: pc.localDescription.sdp
-            }
-        );
+        const response = await fetch(getWebrtcSignalUrl(streamName), {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/sdp",
+                ...(localStorage.getItem("iot_token") ? { Authorization: "Bearer " + localStorage.getItem("iot_token") } : {})
+            },
+            body: pc.localDescription.sdp
+        });
 
         if (!response.ok) {
             throw new Error("WebRTC request failed");

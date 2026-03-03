@@ -22,6 +22,7 @@ services:
     image: alexxit/go2rtc:latest
     container_name: go2rtc
     restart: unless-stopped
+    working_dir: /config
     ports:
       - "1984:1984"
     volumes:
