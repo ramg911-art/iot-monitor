@@ -281,6 +281,70 @@
       return r.ok ? data : (data || { detail: 'Request failed' });
     }
 
+    function getChannelFromExtra(extra) {
+      if (!extra) return null;
+      try {
+        const o = typeof extra === 'string' ? JSON.parse(extra) : extra;
+        return o.channel != null ? o.channel : null;
+      } catch (_) { return null; }
+    }
+
+    function renderNvrList(devices, api, loadAll) {
+      const nvrs = devices.filter(d => d.device_type === 'nvr');
+      const cameras = devices.filter(d => d.device_type === 'nvr_camera');
+      const listEl = document.getElementById('nvr-list');
+      if (!listEl) return;
+      if (nvrs.length === 0) {
+        listEl.innerHTML = '<p style="color:var(--muted);font-size:0.85rem">No NVRs added yet.</p>';
+        return;
+      }
+      listEl.innerHTML = nvrs.map(nvr => {
+        const children = cameras.filter(c => c.parent_device_id === nvr.id);
+        const nvrNameEsc = (nvr.name || '').split('"').join('&quot;');
+        return `
+      <div class="nvr-item" data-nvr-id="${nvr.id}">
+        <h4>
+          <span class="status ${nvr.online ? 'online' : 'offline'}"></span>${nvr.name} ${nvr.ip_address ? '(' + nvr.ip_address + ')' : ''}
+          <button class="delete-btn" data-id="${nvr.id}" data-name="${nvrNameEsc}" style="margin-left:8px;padding:2px 8px;font-size:0.7rem">Delete</button>
+        </h4>
+        ${children.length ? children.map(cam => {
+          const camNameEsc = (cam.name || '').split('"').join('&quot;');
+          return `
+          <div class="nvr-camera-row" data-cam-id="${cam.id}">
+            <span class="channel-info">
+              <span class="status ${cam.online ? 'online' : 'offline'}"></span>
+              Ch${getChannelFromExtra(cam.extra_data) || '-'}: ${cam.name}
+            </span>
+            <span>
+              <button class="toggle-btn ${cam.state === 'on' ? '' : 'off'}" data-cam-id="${cam.id}" style="padding:4px 10px;font-size:0.75rem">${cam.state === 'on' ? 'ON' : 'OFF'}</button>
+              <button class="delete-btn" data-id="${cam.id}" data-name="${camNameEsc}" style="margin-left:4px;padding:2px 8px;font-size:0.7rem">Delete</button>
+            </span>
+          </div>
+        `}).join('') : '<p style="color:var(--muted);font-size:0.8rem;margin:0">No channels discovered</p>'}
+      </div>
+    `;
+      }).join('');
+      listEl.querySelectorAll('.nvr-item .delete-btn').forEach(btn => {
+        btn.onclick = async (e) => {
+          e.stopPropagation();
+          const id = btn.dataset.id;
+          const name = btn.dataset.name || 'device';
+          if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
+          const r = await api('DELETE', '/devices/' + id);
+          if (r && r.deleted) loadAll();
+          else alert(r?.detail || 'Delete failed');
+        };
+      });
+      listEl.querySelectorAll('.nvr-camera-row .toggle-btn').forEach(btn => {
+        btn.onclick = async () => {
+          const id = btn.dataset.camId;
+          const isOn = btn.classList.contains('off');
+          await api('POST', isOn ? `/nvr/camera/${id}/enable` : `/nvr/camera/${id}/disable`);
+          loadAll();
+        };
+      });
+    }
+
     function showLogin() {
       document.getElementById('login-screen').style.display = 'block';
       document.getElementById('app').style.display = 'none';
@@ -329,137 +393,6 @@
       return (data && data.streams) || [];
     }
 
-    let cameraGridPage = 1;
-    const cameraGridPerPage = 16;
-    const MODAL_KEY = '__modal';
-    const activePeers = {};
-
-    function waitForIceGathering(pc) {
-      return new Promise((resolve) => {
-        if (pc.iceGatheringState === 'complete') return resolve();
-        pc.onicegatheringstatechange = () => { if (pc.iceGatheringState === 'complete') resolve(); };
-      });
-    }
-
-    function closeGridPeers() {
-      Object.entries(activePeers).forEach(([key, pc]) => {
-        if (key !== MODAL_KEY) {
-          try { pc.close(); } catch (_) {}
-          delete activePeers[key];
-        }
-      });
-    }
-
-    async function startWebRTC(streamName, videoElement, placeholderEl, isModal) {
-      if (!streamName || !videoElement) return;
-      if (isModal) {
-        if (activePeers[MODAL_KEY]) {
-          try { activePeers[MODAL_KEY].close(); } catch (_) {}
-          delete activePeers[MODAL_KEY];
-        }
-      } else {
-        if (activePeers[streamName]) return;
-        closeGridPeers();
-      }
-
-      const pc = new RTCPeerConnection();
-      activePeers[isModal ? MODAL_KEY : streamName] = pc;
-
-      if (placeholderEl) {
-        placeholderEl.style.display = 'flex';
-        placeholderEl.textContent = 'Connecting…';
-      }
-      videoElement.onerror = () => {
-        if (placeholderEl) { placeholderEl.textContent = 'Stream unavailable'; placeholderEl.style.display = 'flex'; }
-      };
-      videoElement.onplaying = () => { if (placeholderEl) placeholderEl.style.display = 'none'; };
-      pc.ontrack = (event) => {
-        videoElement.srcObject = event.streams[0];
-      };
-      pc.onconnectionstatechange = () => {
-        if (pc.connectionState === 'failed' && placeholderEl) { placeholderEl.textContent = 'Offline'; placeholderEl.style.display = 'flex'; }
-        if (pc.connectionState === 'closed' || pc.connectionState === 'failed') {
-          const key = isModal ? MODAL_KEY : streamName;
-          if (activePeers[key] === pc) delete activePeers[key];
-        }
-      };
-
-      const offer = await pc.createOffer();
-      await pc.setLocalDescription(offer);
-      await waitForIceGathering(pc);
-      const response = await fetch(
-        `/api/cameras/go2rtc-proxy/api/webrtc?src=${encodeURIComponent(streamName)}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/sdp' },
-          body: pc.localDescription.sdp
-        }
-      );
-      if (!response.ok) throw new Error('WebRTC handshake failed');
-      const answerSDP = await response.text();
-      await pc.setRemoteDescription(new RTCSessionDescription({ type: 'answer', sdp: answerSDP }));
-    }
-
-    let go2rtcUrl = '';
-
-    async function loadNvrCamerasGrid(page) {
-      const data = await api('GET', `/cameras/nvr-cameras?page=${page}&per_page=${cameraGridPerPage}`);
-      if (!data) return;
-      if (data.go2rtc_url) go2rtcUrl = data.go2rtc_url.replace(/\/$/, '');
-      renderNvrCameraTiles(data.items || []);
-      renderCameraPagination(data);
-    }
-
-    function renderNvrCameraTiles(cameras) {
-      const grid = document.getElementById('nvr-grid');
-      if (!grid) {
-        console.error('NVR grid container not found');
-        return;
-      }
-      closeGridPeers();
-      grid.innerHTML = '';
-
-      cameras.forEach((cam) => {
-        const tile = document.createElement('div');
-        tile.className = 'nvr-camera-card';
-        tile.dataset.streamName = cam.stream_name;
-
-        const video = document.createElement('video');
-        video.autoplay = true;
-        video.playsInline = true;
-        video.muted = true;
-        video.style.width = '100%';
-        video.style.height = '100%';
-        video.style.objectFit = 'cover';
-
-        tile.appendChild(video);
-        grid.appendChild(tile);
-      });
-    }
-
-    document.addEventListener('click', async function (e) {
-      const tile = e.target.closest('.nvr-camera-card');
-      if (!tile) return;
-      const streamName = tile.dataset.streamName;
-      const video = tile.querySelector('video');
-      if (!streamName || !video) return;
-      await startWebRTC(streamName, video);
-    });
-
-    function renderCameraPagination(data) {
-      const pag = document.getElementById('camera-pagination');
-      if (!pag || !data) return;
-      const pages = data.pages || 1;
-      const page = data.page || 1;
-      const total = data.total || 0;
-      if (total === 0) { pag.innerHTML = ''; return; }
-      pag.innerHTML = `
-        <button ${page <= 1 ? 'disabled' : ''} onclick="cameraGridPage=Math.max(1,cameraGridPage-1);loadNvrCamerasGrid(cameraGridPage)">Prev</button>
-        <span>Page ${page} of ${pages} (${total} cameras)</span>
-        <button ${page >= pages ? 'disabled' : ''} onclick="cameraGridPage=Math.min(${pages},cameraGridPage+1);loadNvrCamerasGrid(cameraGridPage)">Next</button>
-      `;
-    }
-
     async function openCameraModal(streamName, name) {
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
@@ -467,19 +400,20 @@
       const placeholder = document.getElementById('camera-modal-placeholder');
       if (!modal || !video) return;
       title.textContent = name || 'Camera';
-      if (activePeers[MODAL_KEY]) { try { activePeers[MODAL_KEY].close(); } catch (_) {} delete activePeers[MODAL_KEY]; }
       video.srcObject = null;
       video.src = '';
       if (placeholder) { placeholder.textContent = 'Connecting…'; placeholder.style.display = 'flex'; }
       const openGo2rtcLink = document.getElementById('camera-modal-open-go2rtc');
+      const go2rtcUrl = window.GO2RTC_URL || '';
       if (openGo2rtcLink) {
         openGo2rtcLink.href = go2rtcUrl ? `${go2rtcUrl}/api/stream.html?src=${encodeURIComponent(streamName)}` : '#';
         openGo2rtcLink.style.display = streamName && go2rtcUrl ? 'inline' : 'none';
       }
       modal.classList.add('open');
-      if (streamName) {
+      if (streamName && typeof window.startWebRTC === 'function') {
+        video.onplaying = () => { if (placeholder) placeholder.style.display = 'none'; };
         try {
-          await startWebRTC(streamName, video, placeholder, true);
+          await window.startWebRTC(streamName, video);
         } catch (e) {
           console.warn('WebRTC failed:', e);
           if (placeholder) { placeholder.textContent = 'Connection failed'; placeholder.style.display = 'flex'; }
@@ -491,7 +425,6 @@
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
       if (video) { video.pause(); video.srcObject = null; video.src = ''; }
-      if (activePeers[MODAL_KEY]) { try { activePeers[MODAL_KEY].close(); } catch (_) {} delete activePeers[MODAL_KEY]; }
       if (modal) modal.classList.remove('open');
     }
 
@@ -613,7 +546,7 @@
       renderDevices(devList, 'tapo-grid', ['tapo_h100', 'tapo_switch', 'tapo_plug', 'door', 'temp_sensor'], true);
       renderDevices(devList, 'ewelink-grid', ['ewelink'], true);
       if (typeof renderNvrList === 'function') renderNvrList(devList, api, loadAll);
-      loadNvrCamerasGrid(cameraGridPage);
+      if (typeof window.refreshNvrCameras === 'function') window.refreshNvrCameras();
     }
 
     document.getElementById('tapo-add').onclick = () => document.getElementById('tapo-add-modal').classList.add('open');

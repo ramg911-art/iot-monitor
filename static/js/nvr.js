@@ -1,83 +1,96 @@
-/** Dahua NVR UI module - admin form, NVR list, camera grid integration. */
+const GO2RTC_URL = "http://10.0.10.225:1984";
 
-function getChannelFromExtra(extra) {
-  if (!extra) return null;
-  try {
-    const o = typeof extra === 'string' ? JSON.parse(extra) : extra;
-    return o.channel != null ? o.channel : null;
-  } catch (_) { return null; }
+async function fetchCameras() {
+    const token = localStorage.getItem("iot_token") || "";
+    const res = await fetch("/api/cameras/nvr-cameras?page=1&per_page=16", {
+        headers: token ? { Authorization: "Bearer " + token } : {},
+    });
+    const data = await res.json();
+    return data.items || data || [];
 }
 
-function renderNvrList(devices, api, loadAll) {
-  const nvrs = devices.filter(d => d.device_type === 'nvr');
-  const cameras = devices.filter(d => d.device_type === 'nvr_camera');
-  const listEl = document.getElementById('nvr-list');
-  if (!listEl) return;
-  if (nvrs.length === 0) {
-    listEl.innerHTML = '<p style="color:var(--muted);font-size:0.85rem">No NVRs added yet.</p>';
-    return;
-  }
-  listEl.innerHTML = nvrs.map(nvr => {
-    const children = cameras.filter(c => c.parent_device_id === nvr.id);
-    const nvrNameEsc = (nvr.name || '').split('"').join('&quot;');
-    return `
-      <div class="nvr-item" data-nvr-id="${nvr.id}">
-        <h4>
-          <span class="status ${nvr.online ? 'online' : 'offline'}"></span>${nvr.name} ${nvr.ip_address ? '(' + nvr.ip_address + ')' : ''}
-          <button class="delete-btn" data-id="${nvr.id}" data-name="${nvrNameEsc}" style="margin-left:8px;padding:2px 8px;font-size:0.7rem">Delete</button>
-        </h4>
-        ${children.length ? children.map(cam => {
-          const camNameEsc = (cam.name || '').split('"').join('&quot;');
-          return `
-          <div class="nvr-camera-row" data-cam-id="${cam.id}">
-            <span class="channel-info">
-              <span class="status ${cam.online ? 'online' : 'offline'}"></span>
-              Ch${getChannelFromExtra(cam.extra_data) || '-'}: ${cam.name}
-            </span>
-            <span>
-              <button class="toggle-btn ${cam.state === 'on' ? '' : 'off'}" data-cam-id="${cam.id}" style="padding:4px 10px;font-size:0.75rem">${cam.state === 'on' ? 'ON' : 'OFF'}</button>
-              <button class="delete-btn" data-id="${cam.id}" data-name="${camNameEsc}" style="margin-left:4px;padding:2px 8px;font-size:0.7rem">Delete</button>
-            </span>
-          </div>
-        `}).join('') : '<p style="color:var(--muted);font-size:0.8rem;margin:0">No channels discovered</p>'}
-      </div>
-    `;
-  }).join('');
-  listEl.querySelectorAll('.nvr-item .delete-btn').forEach(btn => {
-    btn.onclick = async (e) => {
-      e.stopPropagation();
-      const id = btn.dataset.id;
-      const name = btn.dataset.name || 'device';
-      if (!confirm('Delete "' + name + '"? This cannot be undone.')) return;
-      const r = await api('DELETE', '/devices/' + id);
-      if (r && r.deleted) loadAll();
-      else alert(r?.detail || 'Delete failed');
-    };
-  });
-  listEl.querySelectorAll('.nvr-camera-row .toggle-btn').forEach(btn => {
-    btn.onclick = async () => {
-      const id = btn.dataset.camId;
-      const isOn = btn.classList.contains('off');
-      await api('POST', isOn ? `/nvr/camera/${id}/enable` : `/nvr/camera/${id}/disable`);
-      loadAll();
-    };
-  });
+function renderCameras(cameras) {
+    const container = document.getElementById("nvr-grid");
+    if (!container) {
+        console.error("nvr-grid container missing");
+        return;
+    }
+
+    container.innerHTML = "";
+
+    (cameras || []).forEach((cam) => {
+        const card = document.createElement("div");
+        card.className = "nvr-camera-card";
+        card.dataset.stream = cam.stream_name;
+
+        const video = document.createElement("video");
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.controls = false;
+        video.style.width = "100%";
+        video.style.height = "100%";
+        video.style.objectFit = "cover";
+
+        card.appendChild(video);
+        container.appendChild(card);
+
+        card.addEventListener("click", () => {
+            startWebRTC(cam.stream_name, video);
+        });
+    });
 }
 
-/** Returns HTML string for camera frames (iframe-based). Not used for NVR grid tiles; index.html uses its own renderNvrCameraTiles for #nvr-grid. */
-function getNvrCameraFramesHtml(streams) {
-  return (streams || []).map(s => {
-    const isNvr = s.type === 'nvr_camera';
-    const overlayCls = isNvr && !s.online ? 'stream-overlay offline' : 'stream-overlay';
-    const overlayHtml = isNvr
-      ? `<div class="${overlayCls}"><span class="status ${s.online ? 'online' : 'offline'}"></span>${s.name}${s.parent_name ? ' · ' + s.parent_name : ''}${!s.online ? ' (offline)' : ''}</div>`
-      : '';
-    const streamName = s.stream_name || s.id || '';
-    return `
-      <div class="camera-frame" data-stream-id="${s.id}" data-device-id="${s.device_id || ''}" data-stream-name="${(streamName || '').split('"').join('&quot;')}" data-online="${s.online !== false}">
-        ${overlayHtml}
-        <iframe src="${s.url}" title="${s.name}" ${!s.online && isNvr ? 'style="opacity:0.3"' : ''}></iframe>
-      </div>
-    `;
-  }).join('');
+async function startWebRTC(streamName, videoEl) {
+    try {
+        const pc = new RTCPeerConnection();
+
+        pc.ontrack = (event) => {
+            videoEl.srcObject = event.streams[0];
+        };
+
+        const offer = await pc.createOffer({
+            offerToReceiveVideo: true,
+            offerToReceiveAudio: false
+        });
+
+        await pc.setLocalDescription(offer);
+
+        const response = await fetch(
+            `${GO2RTC_URL}/api/webrtc?src=${encodeURIComponent(streamName)}`,
+            {
+                method: "POST",
+                headers: { "Content-Type": "application/sdp" },
+                body: pc.localDescription.sdp
+            }
+        );
+
+        if (!response.ok) {
+            throw new Error("WebRTC request failed");
+        }
+
+        const answer = await response.text();
+
+        await pc.setRemoteDescription({
+            type: "answer",
+            sdp: answer
+        });
+
+    } catch (err) {
+        console.error("WebRTC error:", err);
+    }
 }
+
+document.addEventListener("DOMContentLoaded", async () => {
+    const cameras = await fetchCameras();
+    renderCameras(cameras);
+});
+
+window.GO2RTC_URL = GO2RTC_URL;
+window.startWebRTC = startWebRTC;
+window.fetchCameras = fetchCameras;
+window.renderCameras = renderCameras;
+window.refreshNvrCameras = async () => {
+    const cameras = await fetchCameras();
+    renderCameras(cameras);
+};

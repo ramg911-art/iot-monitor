@@ -1,11 +1,8 @@
-"""Camera management - go2rtc stream list and playback URLs."""
+"""Camera management - go2rtc stream list and NVR camera metadata (no WebRTC proxy)."""
 import re
-from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
-from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
 
 from app.config import get_settings
@@ -14,11 +11,6 @@ from app.database import async_session_maker
 from app.models.device import Device, DEVICE_TYPE_NVR_CAMERA
 
 router = APIRouter(prefix="/api/cameras", tags=["cameras"])
-
-def _proxy_url(path: str, query: str = "") -> str:
-    """Build proxy URL for frontend (same-origin, avoids CORS/unknown host)."""
-    q = f"?{query}" if query else ""
-    return f"/api/cameras/go2rtc-proxy/{path}{q}"
 
 
 def _get_nvr_stream_name(cam) -> str:
@@ -100,10 +92,8 @@ async def list_nvr_cameras_paginated(
     per_page: int = Query(16, ge=1, le=64),
     user_id: int = Depends(get_current_user_id),
 ):
-    """Paginated list of NVR cameras for 4x4 grid (16 per page)."""
+    """Paginated list of NVR cameras (metadata only). Browser connects directly to go2rtc for WebRTC."""
     async with async_session_maker() as session:
-        settings = get_settings()
-        go2rtc_browser = (settings.go2rtc_public_url or settings.go2rtc_url).rstrip("/")
         count_result = await session.execute(
             select(func.count(Device.id)).where(Device.device_type == DEVICE_TYPE_NVR_CAMERA)
         )
@@ -117,64 +107,18 @@ async def list_nvr_cameras_paginated(
             .limit(per_page)
         )
         cams = result.scalars().all()
-        items = []
-        for cam in cams:
-            go2rtc_src = _get_nvr_stream_name(cam)
-            hls_url = _proxy_url("api/stream.m3u8", f"src={go2rtc_src}")
-            parent_name = None
-            if cam.parent_device_id:
-                p = await session.get(Device, cam.parent_device_id)
-                parent_name = p.name if p else None
-            items.append({
+        items = [
+            {
                 "id": cam.id,
                 "name": cam.name,
-                "channel_number": cam.channel_number,
-                "stream_name": go2rtc_src,
-                "hls_url": hls_url,
-                "parent_name": parent_name,
-                "online": cam.online,
-                "state": cam.state,
-            })
+                "stream_name": _get_nvr_stream_name(cam),
+            }
+            for cam in cams
+        ]
         return {
             "items": items,
             "total": total,
             "page": page,
             "per_page": per_page,
             "pages": (total + per_page - 1) // per_page if total > 0 else 1,
-            "go2rtc_url": go2rtc_browser,
         }
-
-
-@router.api_route("/go2rtc-proxy/{path:path}", methods=["GET", "POST", "OPTIONS"])
-async def go2rtc_proxy(path: str, request: Request):
-    target_url = f"http://127.0.0.1:1984/{path}"
-
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        if request.method == "POST":
-            body = await request.body()
-
-            response = await client.post(
-                target_url,
-                content=body,
-                params=request.query_params,
-                headers={
-                    "Content-Type": request.headers.get(
-                        "content-type",
-                        "application/sdp"
-                    )
-                },
-            )
-        else:
-            response = await client.get(
-                target_url,
-                params=request.query_params
-            )
-
-    return Response(
-        content=response.content,
-        status_code=response.status_code,
-        media_type=response.headers.get(
-            "content-type",
-            "application/sdp"
-        ),
-    )
