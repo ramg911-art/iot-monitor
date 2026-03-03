@@ -3,7 +3,7 @@ import re
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 import httpx
@@ -160,6 +160,20 @@ async def go2rtc_proxy(path: str, request: Request):
         for k, v in request.headers.items()
         if k.lower() not in ["host", "content-length", "origin"]
     }
+
+    if request.method in ("POST", "OPTIONS"):
+        resp = await _go2rtc_client.request(
+            request.method,
+            target_url,
+            content=body,
+            headers=headers,
+        )
+        return Response(
+            content=resp.content,
+            status_code=resp.status_code,
+            headers=dict(resp.headers),
+            media_type=resp.headers.get("content-type"),
+        )
 
     async def stream_generator():
         async with _go2rtc_client.stream(
