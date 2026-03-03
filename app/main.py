@@ -50,7 +50,7 @@ CSP = (
     "connect-src 'self' http: ws:; "
     "img-src 'self' data: blob:; "
     "media-src 'self' blob:; "
-    "script-src 'self' https://cdn.jsdelivr.net; "
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
     "style-src 'self' 'unsafe-inline'; "
     "font-src 'self' data:; "
     "frame-src 'self'"
