@@ -157,7 +157,7 @@ async def go2rtc_proxy(path: str, request: Request):
     headers = {
         k: v
         for k, v in request.headers.items()
-        if k.lower() not in ["host", "content-length"]
+        if k.lower() not in ["host", "content-length", "origin"]
     }
 
     client = httpx.AsyncClient(timeout=None)
