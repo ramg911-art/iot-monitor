@@ -250,7 +250,10 @@
   <div id="camera-modal" class="modal camera-modal">
     <div class="modal-content">
       <h3 id="camera-modal-title">Camera</h3>
-      <video id="camera-modal-video" controls muted autoplay playsinline></video>
+      <div class="camera-modal-video-wrap" style="position:relative;background:#000;border-radius:var(--radius);min-height:200px">
+        <video id="camera-modal-video" controls muted autoplay playsinline style="width:100%;display:block"></video>
+        <div id="camera-modal-placeholder" style="position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;color:var(--muted);font-size:0.9rem;background:rgba(0,0,0,0.8)">Connecting…</div>
+      </div>
       <div class="actions" style="margin-top:12px">
         <button class="secondary" onclick="closeCameraModal()">Close</button>
       </div>
@@ -338,12 +341,21 @@
       });
     }
 
-    async function startWebRTC(videoElement, streamName) {
+    async function startWebRTC(videoElement, streamName, placeholderEl) {
       if (!videoElement || !streamName) return;
       const pc = new RTCPeerConnection();
       webrtcConnections['modal'] = pc;
+      if (placeholderEl) placeholderEl.style.display = 'flex';
+      if (placeholderEl) placeholderEl.textContent = 'Connecting…';
+      videoElement.onerror = () => {
+        if (placeholderEl) { placeholderEl.textContent = 'Stream unavailable'; placeholderEl.style.display = 'flex'; }
+      };
+      videoElement.onplaying = () => { if (placeholderEl) placeholderEl.style.display = 'none'; };
       pc.ontrack = (event) => {
         videoElement.srcObject = event.streams[0];
+      };
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' && placeholderEl) { placeholderEl.textContent = 'Connection failed'; placeholderEl.style.display = 'flex'; }
       };
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -449,19 +461,22 @@
       const modal = document.getElementById('camera-modal');
       const video = document.getElementById('camera-modal-video');
       const title = document.getElementById('camera-modal-title');
+      const placeholder = document.getElementById('camera-modal-placeholder');
       if (!modal || !video) return;
       title.textContent = name || 'Camera';
       if (webrtcConnections['modal']) { try { webrtcConnections['modal'].close(); } catch (_) {} delete webrtcConnections['modal']; }
       video.srcObject = null;
       video.src = '';
+      if (placeholder) { placeholder.textContent = 'Connecting…'; placeholder.style.display = 'flex'; }
       modal.classList.add('open');
       if (streamName) {
         try {
-          await startWebRTC(video, streamName);
+          await startWebRTC(video, streamName, placeholder);
         } catch (e) {
           console.warn('WebRTC failed:', e);
+          if (placeholder) { placeholder.textContent = 'Connection failed'; placeholder.style.display = 'flex'; }
         }
-      }
+      } else if (placeholder) placeholder.style.display = 'none';
     }
 
     function closeCameraModal() {
