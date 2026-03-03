@@ -43,6 +43,7 @@ async def list_streams(
 ):
     """List go2rtc streams + NVR cameras (for camera grid)."""
     settings = get_settings()
+    go2rtc_browser = (settings.go2rtc_public_url or settings.go2rtc_url).rstrip("/")
     streams = []
 
     # go2rtc streams
@@ -55,7 +56,7 @@ async def list_streams(
                     streams.append({
                         "id": sid,
                         "name": info.get("name", sid),
-                        "url": f"{settings.go2rtc_url}/api/stream.html?src={sid}",
+                        "url": f"{go2rtc_browser}/api/stream.html?src={sid}",
                         "type": "go2rtc",
                         "device_id": None,
                         "parent_name": None,
@@ -73,7 +74,7 @@ async def list_streams(
         for cam in nvr_cams:
             stream_id = _get_nvr_stream_name(cam)
             hls_url = f"{settings.go2rtc_url}/api/hls/{stream_id}/index.m3u8"
-            html_url = f"{settings.go2rtc_url}/api/stream.html?src={stream_id}"
+            html_url = f"{go2rtc_browser}/api/stream.html?src={stream_id}"
             parent_name = None
             if cam.parent_device_id:
                 p = await session.get(Device, cam.parent_device_id)
@@ -90,7 +91,7 @@ async def list_streams(
                 "online": cam.online,
             })
 
-    return {"streams": streams, "go2rtc_url": settings.go2rtc_url}
+    return {"streams": streams, "go2rtc_url": go2rtc_browser}
 
 
 @router.get("/nvr-cameras")
@@ -102,6 +103,7 @@ async def list_nvr_cameras_paginated(
     """Paginated list of NVR cameras for 4x4 grid (16 per page)."""
     async with async_session_maker() as session:
         settings = get_settings()
+        go2rtc_browser = (settings.go2rtc_public_url or settings.go2rtc_url).rstrip("/")
         count_result = await session.execute(
             select(func.count(Device.id)).where(Device.device_type == DEVICE_TYPE_NVR_CAMERA)
         )
@@ -139,7 +141,7 @@ async def list_nvr_cameras_paginated(
             "page": page,
             "per_page": per_page,
             "pages": (total + per_page - 1) // per_page if total > 0 else 1,
-            "go2rtc_url": settings.go2rtc_url,
+            "go2rtc_url": go2rtc_browser,
         }
 
 

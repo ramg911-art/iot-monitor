@@ -40,7 +40,8 @@ class Settings(BaseSettings):
     admin_password: str = "admin"  # Must change on first deploy
 
     # go2rtc
-    go2rtc_url: str = "http://go2rtc:1984"  # Docker service name
+    go2rtc_url: str = "http://go2rtc:1984"  # Backend: Docker service name or http://127.0.0.1:1984
+    go2rtc_public_url: Optional[str] = None  # Browser: e.g. http://10.0.10.225:1984 for "Open in go2rtc" link
 
 
 @lru_cache
